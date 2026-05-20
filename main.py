@@ -1,93 +1,159 @@
 import cv2
 
-from area_selector import crop_rois, draw_rois
-from card_reader import CardReader
-from chip_counter import ChipCounter, optimize_chips
-from config import CHIP_VALUES
-from hand_sign_reader import HandSignReader
+import blackjack_engine
+from card_vision import load_templates, read_cards_from_area
+from chip_vision import calculate_bet, count_chips_by_color, optimize_chips
+from config import (
+    CHIP_VALUES,
+    PRINT_EVERY_FRAME,
+    RANK_TEMPLATE_DIR,
+    ROIS,
+    SHOW_DEBUG_WINDOWS,
+    SUIT_TEMPLATE_DIR,
+)
+from game_state import GameState
+from hand_sign_vision import DoubleDownDetector, read_hand_sign
+from robot_commands import orders_from_action
+from vision_areas import crop_area, detect_colored_tape_areas, draw_rois
+
+
+def choose_robot_orders(handsign, recommended_action, current_bet):
+    """
+    Sinal do jogador tem prioridade. Se nao houver sinal, usa a recomendacao
+    matematica apenas como demonstracao.
+    """
+    if handsign == 1:
+        return orders_from_action("hit")
+    if handsign == 2:
+        return orders_from_action("stand")
+    if handsign == 3:
+        return orders_from_action("double", optimize_chips(current_bet, CHIP_VALUES))
+    if handsign == 4:
+        return orders_from_action("split")
+
+    return orders_from_action(recommended_action, optimize_chips(current_bet, CHIP_VALUES))
 
 
 def main():
     cap = cv2.VideoCapture(0)
-
     if not cap.isOpened():
         print("Nao foi possivel abrir a camera.")
         return
 
-    card_reader = CardReader()
-    chip_counter = ChipCounter()
-    hand_reader = HandSignReader()
+    rank_templates = load_templates(RANK_TEMPLATE_DIR)
+    suit_templates = load_templates(SUIT_TEMPLATE_DIR)
 
-    # Aposta original: neste exemplo didatico, guardamos a primeira aposta
-    # detectada maior que zero. Em um sistema real, ela pode vir do fluxo do jogo.
-    original_bet = 0
+    game_state = GameState()
+    double_detector = DoubleDownDetector(required_seconds=3)
+
+    print("Templates de ranks carregados:", list(rank_templates.keys()))
+    print("Templates de naipes carregados:", list(suit_templates.keys()))
+    print("Pressione q para sair. Pressione r para resetar a rodada.")
 
     while True:
-        ret, frame = cap.read()
-        if not ret:
-            print("Falha ao ler frame da camera.")
+        ok, frame = cap.read()
+        if not ok:
+            print("Falha ao capturar frame.")
             break
 
-        rois = crop_rois(frame)
-        debug_frame = draw_rois(frame)
+        debug_rois = draw_rois(frame, ROIS)
 
-        player_cards, player_cards_debug, player_cards_threshold = card_reader.read_cards(
-            rois["player_cards"], debug=True
+        player_area = crop_area(frame, ROIS["player_cards"])
+        dealer_area = crop_area(frame, ROIS["dealer_cards"])
+        chip_area = crop_area(frame, ROIS["player_chips"])
+        hand_area = crop_area(frame, ROIS["hand_sign_area"])
+
+        player_cards, player_debug, player_thresh = read_cards_from_area(
+            player_area, rank_templates, suit_templates, debug=True
         )
-        dealer_cards, dealer_cards_debug, dealer_cards_threshold = card_reader.read_cards(
-            rois["dealer_cards"], debug=True
+        dealer_cards, dealer_debug, dealer_thresh = read_cards_from_area(
+            dealer_area, rank_templates, suit_templates, debug=True
         )
 
-        detected_chips, current_bet, chips_debug, _ = chip_counter.count_chips(
-            rois["player_chips"], debug=True
-        )
+        game_state.update_player_cards(player_cards, hand_index=0)
+        game_state.update_dealer_cards(dealer_cards)
 
-        if original_bet == 0 and current_bet > 0:
-            original_bet = current_bet
+        chip_counts, chip_debug, chip_masks = count_chips_by_color(chip_area, debug=True)
+        current_bet = calculate_bet(chip_counts, CHIP_VALUES)
 
-        handsign, split, hand_debug, hand_mask = hand_reader.read_hand_sign(
-            rois["hand_sign"],
-            original_bet=original_bet,
+        if game_state.original_bet == 0 and current_bet > 0:
+            game_state.original_bet = current_bet
+
+        game_state.current_bet = current_bet
+        game_state.optimized_chips = optimize_chips(current_bet, CHIP_VALUES)
+
+        handsign, split, hand_debug, hand_mask = read_hand_sign(
+            hand_area,
+            double_detector,
+            original_bet=game_state.original_bet,
             current_bet=current_bet,
             debug=True,
         )
+        game_state.Handsign = handsign
+        game_state.Split = split
 
-        optimized_chips = optimize_chips(current_bet, CHIP_VALUES)
+        player_value = blackjack_engine.hand_value(player_cards)
+        dealer_value = blackjack_engine.hand_value(dealer_cards)
+        dealer_upcard = dealer_cards[0] if dealer_cards else None
 
-        game_state = {
-            "Handsign": handsign,
-            "Split": split,
+        recommended_action = blackjack_engine.basic_strategy(
+            player_cards,
+            dealer_upcard,
+            can_double=True,
+            can_split=blackjack_engine.can_split(player_cards),
+        )
+
+        robot_orders = choose_robot_orders(handsign, recommended_action, current_bet)
+        game_state.robot_orders = robot_orders
+
+        state_output = {
+            "Handsign": game_state.Handsign,
+            "Split": game_state.Split,
             "PlayerCards": player_cards,
             "DealerCards": dealer_cards,
-            "BetTotal": current_bet,
-            "OptimizedChips": optimized_chips,
-            "DetectedChips": detected_chips,
+            "SeenCards": game_state.seen_cards,
+            "PlayerValue": player_value,
+            "DealerValue": dealer_value,
+            "CurrentBet": game_state.current_bet,
+            "OriginalBet": game_state.original_bet,
+            "ChipCounts": chip_counts,
+            "OptimizedChips": game_state.optimized_chips,
+            "RecommendedAction": recommended_action,
+            "RobotOrders": robot_orders,
         }
 
-        # Estado textual no terminal para integracao futura com o robo UR.
-        print(game_state)
+        if PRINT_EVERY_FRAME:
+            print(state_output)
 
-        cv2.imshow("Mesa - ROIs", debug_frame)
-        cv2.imshow("Player Cards", player_cards_debug)
-        cv2.imshow("Dealer Cards", dealer_cards_debug)
-        cv2.imshow("Player Cards Threshold", player_cards_threshold)
-        cv2.imshow("Dealer Cards Threshold", dealer_cards_threshold)
-        cv2.imshow("Chips", chips_debug)
-        cv2.imshow("Hand Sign", hand_debug)
+        if SHOW_DEBUG_WINDOWS:
+            tape_boxes = detect_colored_tape_areas(frame)
+            for boxes in tape_boxes.values():
+                for x, y, w, h in boxes:
+                    cv2.rectangle(debug_rois, (x, y), (x + w, y + h), (255, 255, 255), 1)
 
-        if hand_mask is not None:
-            cv2.imshow("Hand Skin Mask", hand_mask)
+            cv2.imshow("Mesa - ROIs", debug_rois)
+            cv2.imshow("Cartas Jogador", player_debug)
+            cv2.imshow("Cartas Dealer", dealer_debug)
+            cv2.imshow("Threshold Jogador", player_thresh)
+            cv2.imshow("Threshold Dealer", dealer_thresh)
+            cv2.imshow("Fichas", chip_debug)
+            cv2.imshow("Sinal de Mao", hand_debug)
+
+            if hand_mask is not None:
+                cv2.imshow("Mascara Pele", hand_mask)
+
+            for color, mask in chip_masks.items():
+                cv2.imshow(f"Mascara Ficha {color}", mask)
 
         key = cv2.waitKey(1) & 0xFF
-
-        # Teclas simples para debug:
-        # q: sair
-        # r: recalibrar aposta original usando a aposta atual
         if key == ord("q"):
             break
         if key == ord("r"):
-            original_bet = current_bet
-            print(f"Aposta original recalibrada para: {original_bet}")
+            game_state.reset_round()
+            double_detector = DoubleDownDetector(required_seconds=3)
+            print("Rodada resetada.")
+
+        game_state.start_new_round_if_needed()
 
     cap.release()
     cv2.destroyAllWindows()

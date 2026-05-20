@@ -1,69 +1,83 @@
 """
-Configuracoes simples do projeto.
+Configuracao central do projeto.
 
-A ideia e deixar todos os valores que dependem da mesa/camera neste arquivo,
-para que a calibracao seja facil de explicar e alterar.
+Tudo que depende da camera, mesa, cores e valores de fichas fica aqui para
+facilitar a calibracao durante testes em bancada.
 """
 
-# ROIs fixas no formato: (x, y, largura, altura)
-# Ajuste estes valores conforme a posicao real da camera sobre a mesa.
+# ROIs fixas no formato (x, y, largura, altura).
+# Ajuste esses valores conforme a resolucao da camera e a posicao da mesa.
 ROIS = {
-    "player_cards": (120, 300, 420, 180),
-    "dealer_cards": (120, 60, 420, 160),
-    "player_chips": (600, 300, 220, 180),
-    "hand_sign": (560, 80, 300, 220),
+    "dealer_cards": (900, 285, 330, 270),
+    "player_cards": (320, 355, 300, 215),
+    "player_split_1": (320, 355, 100, 215),
+    "player_split_2": (420, 355, 100, 215),
+    "player_split_3": (520, 355, 100, 215),
+    "player_chips": (320, 565, 380, 285),
+    "dealer_area": (900, 285, 330, 270),
+    "hand_sign_area": (315, 565, 385, 285),
 }
 
-# Cores usadas para desenhar as ROIs no frame de debug (B, G, R).
 ROI_COLORS = {
-    "player_cards": (0, 255, 0),
     "dealer_cards": (255, 0, 0),
+    "player_cards": (0, 255, 0),
+    "player_split_1": (0, 180, 0),
+    "player_split_2": (0, 200, 120),
+    "player_split_3": (0, 220, 220),
     "player_chips": (0, 255, 255),
-    "hand_sign": (255, 0, 255),
+    "dealer_area": (255, 120, 0),
+    "hand_sign_area": (255, 0, 255),
 }
 
-# Caminhos dos templates de ranks e naipes.
 RANK_TEMPLATE_DIR = "templates/ranks"
 SUIT_TEMPLATE_DIR = "templates/suits"
 
-# Parametros para detectar cartas como regioes claras e retangulares.
+# Deteccao de cartas brancas.
 CARD_MIN_AREA = 1200
-CARD_ASPECT_RATIO_RANGE = (0.45, 0.85)  # largura / altura
-CARD_CORNER_RATIO = (0.32, 0.28)        # canto superior esquerdo da carta
+CARD_ASPECT_RATIO_MIN = 0.45
+# Aceita cartas em pe e deitadas. Nas imagens de referencia, varias cartas
+# aparecem em orientacao horizontal.
+CARD_ASPECT_RATIO_MAX = 2.40
+CARD_CORNER_WIDTH_RATIO = 0.32
+CARD_CORNER_HEIGHT_RATIO = 0.30
 TEMPLATE_MATCH_THRESHOLD = 0.55
+CARD_W = 200
+CARD_H = 300
+DEBUG_CARD_VISION = False
 
-# Valores das fichas. Ajuste conforme o padrao usado na mesa.
+# Valores atuais das fichas usadas na mesa.
 CHIP_VALUES = {
-    "white": 1,
-    "red": 5,
-    "green": 25,
-    "yellow": 50,
+    "yellow": 25,
+    "green": 50,
     "blue": 100,
 }
 
-# Faixas HSV para fichas. Em OpenCV, H vai de 0 a 179.
-# Para vermelho existem duas faixas porque o hue passa pelo zero.
+# Faixas HSV. OpenCV usa H de 0 a 179.
+HSV_RANGES = {
+    "red_tape": [((0, 90, 70), (10, 255, 255)), ((170, 90, 70), (179, 255, 255))],
+    "blue_tape": [((90, 70, 60), (130, 255, 255))],
+    "yellow_tape": [((18, 80, 80), (35, 255, 255))],
+    "yellow_chip": [((18, 80, 80), (35, 255, 255))],
+    "green_chip": [((40, 60, 60), (85, 255, 255))],
+    "blue_chip": [((90, 70, 60), (130, 255, 255))],
+}
+
 CHIP_HSV_RANGES = {
-    "white": [((0, 0, 170), (179, 70, 255))],
-    "red": [((0, 80, 70), (10, 255, 255)), ((170, 80, 70), (179, 255, 255))],
-    "yellow": [((18, 80, 80), (35, 255, 255))],
-    "blue": [((90, 70, 60), (130, 255, 255))],
-    "green": [((40, 60, 60), (85, 255, 255))],
+    "yellow": HSV_RANGES["yellow_chip"],
+    "green": HSV_RANGES["green_chip"],
+    "blue": HSV_RANGES["blue_chip"],
 }
 
 CHIP_MIN_AREA = 250
 CHIP_MAX_AREA = 8000
+CHIP_MIN_CIRCULARITY = 0.45
 
-# Segmentacao simples de pele em HSV para leitura de mao.
+# Segmentacao simples de pele para sinais de mao.
 SKIN_HSV_LOWER = (0, 30, 60)
 SKIN_HSV_UPPER = (25, 180, 255)
 HAND_MIN_AREA = 2500
-
-# Regras simples de interpretacao dos dedos estimados.
-FINGERS_FOR_HIT = 1
-FINGERS_FOR_STAND = 0
-FINGERS_FOR_SPLIT = 2
-
-# Double down: aposta atual precisa ficar pelo menos 2x a original por 3 s.
-DOUBLE_DOWN_MULTIPLIER = 2.0
 DOUBLE_DOWN_SECONDS = 3.0
+
+# Controles de debug.
+SHOW_DEBUG_WINDOWS = True
+PRINT_EVERY_FRAME = True
