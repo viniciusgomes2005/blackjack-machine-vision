@@ -15,7 +15,7 @@ from config import (
     SUIT_TEMPLATE_DIR,
 )
 from game_state import GameState
-from hand_sign_vision import DoubleDownDetector, read_hand_sign
+from hand_sign_vision import DoubleDownDetector, HandSignStabilizer, read_hand_sign
 from robot_commands import orders_from_action
 from vision_areas import crop_area, detect_colored_tape_areas, draw_rois
 
@@ -56,6 +56,7 @@ def main():
 
     game_state = GameState()
     double_detector = DoubleDownDetector(required_seconds=3)
+    hand_sign_stabilizer = HandSignStabilizer()
 
     print("Templates de ranks carregados:", list(rank_templates.keys()))
     print("Templates de naipes carregados:", list(suit_templates.keys()))
@@ -99,6 +100,7 @@ def main():
             original_bet=game_state.original_bet,
             current_bet=current_bet,
             debug=True,
+            stabilizer=hand_sign_stabilizer,
         )
         game_state.Handsign = handsign
         game_state.Split = split
@@ -172,6 +174,7 @@ def main():
         if key == ord("r"):
             game_state.reset_round()
             double_detector = DoubleDownDetector(required_seconds=3)
+            hand_sign_stabilizer.reset()
             print("Rodada resetada.")
 
         game_state.start_new_round_if_needed()

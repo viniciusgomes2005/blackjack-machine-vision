@@ -1,5 +1,6 @@
 import argparse
 import time
+from collections import Counter, deque
 from dataclasses import dataclass
 
 import numpy as np
@@ -13,10 +14,14 @@ from config import (
     BLUE_HAND_ZONE_DILATE_PX,
     BLUE_HAND_ZONE_MIN_AREA,
     DOUBLE_DOWN_SECONDS,
+    HAND_SIGN_HISTORY_SIZE,
+    HAND_SIGN_MIN_STABLE_FRAMES,
     HAND_MIN_AREA,
     HSV_RANGES,
     SKIN_HSV_LOWER,
     SKIN_HSV_UPPER,
+    SKIN_YCRCB_LOWER,
+    SKIN_YCRCB_UPPER,
 )
 from camera_utils import open_camera
 from vision_areas import mask_from_hsv_ranges
@@ -52,6 +57,36 @@ class DoubleDownDetector:
         return (time.time() - self.start_time) >= self.required_seconds
 
 
+class HandSignStabilizer:
+    """Suaviza leituras quadro a quadro antes de publicar o sinal."""
+
+    def __init__(
+        self,
+        history_size=HAND_SIGN_HISTORY_SIZE,
+        min_stable_frames=HAND_SIGN_MIN_STABLE_FRAMES,
+    ):
+        self.history_size = history_size
+        self.min_stable_frames = min_stable_frames
+        self.values = deque(maxlen=history_size)
+        self.last_stable = 0
+
+    def reset(self):
+        self.values.clear()
+        self.last_stable = 0
+
+    def update(self, raw_value):
+        self.values.append(int(raw_value))
+        value, count = Counter(self.values).most_common(1)[0]
+
+        if count >= self.min_stable_frames:
+            self.last_stable = value
+
+        if raw_value == 0 and count >= max(2, self.min_stable_frames - 1):
+            self.last_stable = 0
+
+        return self.last_stable
+
+
 @dataclass(frozen=True)
 class HandZone:
     """Mascara inferida da area azul onde sinais de mao sao validos."""
@@ -61,14 +96,30 @@ class HandZone:
     found: bool
 
 
+@dataclass(frozen=True)
+class FingerDetection:
+    count: int
+    contour: np.ndarray | None
+    palm_center: tuple[int, int] | None
+    palm_radius: float
+    fingertips: tuple[tuple[int, int], ...]
+
+
 def _skin_mask(hand_area):
     _require_cv2()
     hsv = cv2.cvtColor(hand_area, cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(
+    hsv_mask = cv2.inRange(
         hsv,
         np.array(SKIN_HSV_LOWER, dtype=np.uint8),
         np.array(SKIN_HSV_UPPER, dtype=np.uint8),
     )
+    ycrcb = cv2.cvtColor(hand_area, cv2.COLOR_BGR2YCrCb)
+    ycrcb_mask = cv2.inRange(
+        ycrcb,
+        np.array(SKIN_YCRCB_LOWER, dtype=np.uint8),
+        np.array(SKIN_YCRCB_UPPER, dtype=np.uint8),
+    )
+    mask = cv2.bitwise_and(hsv_mask, ycrcb_mask)
 
     kernel = np.ones((5, 5), np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
@@ -128,8 +179,77 @@ def _apply_allowed_zone(mask, allowed_mask):
     return cv2.bitwise_and(mask, mask, mask=clean_allowed)
 
 
-def _estimate_fingers(contour):
-    """Estima dedos por convexity defects. E uma heuristica simples."""
+def _main_hand_contour(mask):
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+
+    contour = max(contours, key=cv2.contourArea)
+    if cv2.contourArea(contour) < HAND_MIN_AREA:
+        return None
+
+    return contour
+
+
+def _estimate_palm(mask, contour):
+    contour_mask = np.zeros(mask.shape, dtype=np.uint8)
+    cv2.drawContours(contour_mask, [contour], -1, 255, -1)
+    distance = cv2.distanceTransform(contour_mask, cv2.DIST_L2, 5)
+    _, radius, _, center = cv2.minMaxLoc(distance)
+    return center, float(radius)
+
+
+def _cluster_fingertips(candidates, min_distance):
+    if not candidates:
+        return ()
+
+    ordered = sorted(candidates, key=lambda item: item[0][0])
+    clusters = []
+
+    for point, score in ordered:
+        if not clusters:
+            clusters.append([(point, score)])
+            continue
+
+        previous_point = clusters[-1][-1][0]
+        if abs(point[0] - previous_point[0]) <= min_distance:
+            clusters[-1].append((point, score))
+        else:
+            clusters.append([(point, score)])
+
+    fingertips = []
+    for cluster in clusters:
+        point, _ = max(cluster, key=lambda item: item[1])
+        fingertips.append(point)
+
+    return tuple(fingertips)
+
+
+def _fingertips_from_hull(contour, palm_center, palm_radius):
+    hull = cv2.convexHull(contour, returnPoints=True)
+    if hull is None or len(hull) < 4 or palm_radius <= 0:
+        return ()
+
+    center = np.array(palm_center, dtype=np.float32)
+    candidates = []
+
+    for point in hull[:, 0, :]:
+        point_f = point.astype(np.float32)
+        vector = point_f - center
+        distance = float(np.linalg.norm(vector))
+        if distance < palm_radius * 1.35:
+            continue
+        if point[1] > palm_center[1] - palm_radius * 0.25:
+            continue
+
+        # Pontas reais ficam longe da palma e relativamente altas no contorno.
+        height_score = max(0.0, palm_center[1] - float(point[1]))
+        candidates.append(((int(point[0]), int(point[1])), distance + height_score))
+
+    return _cluster_fingertips(candidates, min_distance=max(12.0, palm_radius * 0.7))
+
+
+def _defect_gap_count(contour, palm_radius):
     x, y, w, h = cv2.boundingRect(contour)
     if w == 0 or h == 0:
         return 0
@@ -140,11 +260,10 @@ def _estimate_fingers(contour):
 
     defects = cv2.convexityDefects(contour, hull)
     if defects is None:
-        # Uma mao com apenas um dedo levantado normalmente nao gera "buracos"
-        # entre dedos. Usa o formato alto/estreito do contorno como fallback.
-        return 1 if h > 1.45 * w else 0
+        return 0
 
     gaps = 0
+    min_depth = max(8000, int(palm_radius * 120))
     for i in range(defects.shape[0]):
         start_i, end_i, far_i, depth = defects[i, 0]
         start = contour[start_i][0]
@@ -162,40 +281,76 @@ def _estimate_fingers(contour):
         cosine = np.clip(cosine, -1.0, 1.0)
         angle = np.degrees(np.arccos(cosine))
 
-        if angle < 90 and depth > 10000:
+        if angle < 85 and depth > min_depth:
             gaps += 1
 
-    if gaps == 0:
-        return 1 if h > 1.45 * w else 0
+    return gaps
 
-    return min(gaps + 1, 5)
+
+def _single_finger_fallback(contour, palm_center, palm_radius):
+    x, y, w, h = cv2.boundingRect(contour)
+    if w == 0 or h == 0 or palm_radius <= 0:
+        return 0
+
+    top_distance = palm_center[1] - y
+    narrow_shape = h > 1.45 * w
+    high_tip = top_distance > palm_radius * 1.8
+    return 1 if narrow_shape or high_tip else 0
+
+
+def _detect_fingers(mask):
+    contour = _main_hand_contour(mask)
+    if contour is None:
+        return FingerDetection(0, None, None, 0.0, ())
+
+    palm_center, palm_radius = _estimate_palm(mask, contour)
+    fingertips = _fingertips_from_hull(contour, palm_center, palm_radius)
+    gap_count = _defect_gap_count(contour, palm_radius)
+
+    if fingertips:
+        count = len(fingertips)
+        if gap_count >= 2:
+            count = max(count, min(gap_count + 1, 5))
+    else:
+        count = _single_finger_fallback(contour, palm_center, palm_radius)
+
+    return FingerDetection(
+        count=min(count, 5),
+        contour=contour,
+        palm_center=(int(palm_center[0]), int(palm_center[1])),
+        palm_radius=palm_radius,
+        fingertips=fingertips,
+    )
 
 
 def read_finger_count(hand_area, debug=False, allowed_mask=None):
     """Retorna a quantidade de dedos levantados detectada na imagem."""
     mask = _skin_mask(hand_area)
     mask = _apply_allowed_zone(mask, allowed_mask)
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    detection = _detect_fingers(mask)
     debug_img = hand_area.copy()
 
-    if not contours:
-        if debug:
-            return 0, debug_img, mask
-        return 0
-
-    contour = max(contours, key=cv2.contourArea)
-    if cv2.contourArea(contour) < HAND_MIN_AREA:
-        if debug:
-            return 0, debug_img, mask
-        return 0
-
-    fingers = _estimate_fingers(contour)
-
     if debug:
-        cv2.drawContours(debug_img, [contour], -1, (0, 255, 0), 2)
+        if detection.contour is not None:
+            cv2.drawContours(debug_img, [detection.contour], -1, (0, 255, 0), 2)
+
+        if detection.palm_center is not None:
+            cv2.circle(
+                debug_img,
+                detection.palm_center,
+                max(2, int(detection.palm_radius)),
+                (0, 180, 255),
+                2,
+            )
+
+        for fingertip in detection.fingertips:
+            cv2.circle(debug_img, fingertip, 8, (0, 0, 255), -1)
+
         cv2.putText(
             debug_img,
-            f"dedos={fingers}",
+            f"dedos={detection.count}",
             (10, 35),
             cv2.FONT_HERSHEY_SIMPLEX,
             1.0,
@@ -203,9 +358,9 @@ def read_finger_count(hand_area, debug=False, allowed_mask=None):
             2,
             cv2.LINE_AA,
         )
-        return fingers, debug_img, mask
+        return detection.count, debug_img, mask
 
-    return fingers
+    return detection.count
 
 
 def read_hand_sign(
@@ -215,6 +370,7 @@ def read_hand_sign(
     current_bet,
     debug=False,
     require_blue_area=True,
+    stabilizer=None,
 ):
     """
     Retorna (Handsign, Split), onde Handsign agora e a quantidade de dedos.
@@ -256,8 +412,8 @@ def read_hand_sign(
             allowed_mask=allowed_mask,
         )
 
-    handsign = fingers
-    split = 1 if fingers == 2 else 0
+    handsign = stabilizer.update(fingers) if stabilizer is not None else fingers
+    split = 1 if handsign == 2 else 0
 
     if debug:
         if hand_zone is not None and hand_zone.found:
@@ -268,6 +424,17 @@ def read_hand_sign(
                 hand_zone.blue_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
             )
             cv2.drawContours(debug_img, blue_contours, -1, (255, 0, 0), 2)
+        if stabilizer is not None:
+            cv2.putText(
+                debug_img,
+                f"estavel={handsign}",
+                (10, 70),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                (0, 255, 255),
+                2,
+                cv2.LINE_AA,
+            )
         return handsign, split, debug_img, mask
 
     return handsign, split
@@ -281,6 +448,7 @@ def run_camera(camera_index=0):
         return
 
     print("Pressione q para sair.")
+    stabilizer = HandSignStabilizer()
     while True:
         ok, frame = cap.read()
         if not ok:
@@ -291,11 +459,12 @@ def run_camera(camera_index=0):
         allowed_mask = hand_zone.mask if hand_zone.found else np.zeros(
             frame.shape[:2], dtype=np.uint8
         )
-        fingers, debug_img, mask = read_finger_count(
+        raw_fingers, debug_img, mask = read_finger_count(
             frame,
             debug=True,
             allowed_mask=allowed_mask,
         )
+        fingers = stabilizer.update(raw_fingers)
         cv2.putText(
             debug_img,
             f"Dedos levantados: {fingers}",

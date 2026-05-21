@@ -75,8 +75,12 @@ CHIP_MIN_CIRCULARITY = 0.45
 # Segmentacao simples de pele para sinais de mao.
 SKIN_HSV_LOWER = (0, 30, 60)
 SKIN_HSV_UPPER = (25, 180, 255)
+SKIN_YCRCB_LOWER = (0, 133, 77)
+SKIN_YCRCB_UPPER = (255, 173, 127)
 HAND_MIN_AREA = 2500
 DOUBLE_DOWN_SECONDS = 3.0
+HAND_SIGN_HISTORY_SIZE = 7
+HAND_SIGN_MIN_STABLE_FRAMES = 4
 
 # A mao so conta quando estiver dentro da area azul. A mascara azul e
 # reconstruida a partir dos pedacos visiveis, porque mao/braco podem esconder

@@ -39,7 +39,11 @@ def test_blue_hand_zone_is_inferred_from_irregular_area():
 
 
 def test_hand_sign_only_counts_skin_inside_blue_zone(monkeypatch):
-    monkeypatch.setattr(hand_sign_vision, "_estimate_fingers", lambda contour: 4)
+    def fake_detect_fingers(mask):
+        count = 4 if cv2.countNonZero(mask) > 0 else 0
+        return hand_sign_vision.FingerDetection(count, None, None, 0.0, ())
+
+    monkeypatch.setattr(hand_sign_vision, "_detect_fingers", fake_detect_fingers)
 
     inside = _frame_with_irregular_blue_zone()
     cv2.rectangle(inside, (85, 85), (150, 170), _skin_bgr(), -1)
@@ -59,3 +63,30 @@ def test_hand_sign_only_counts_skin_inside_blue_zone(monkeypatch):
         original_bet=0,
         current_bet=0,
     ) == (0, 0)
+
+
+def test_hand_sign_stabilizer_requires_repeated_values():
+    stabilizer = hand_sign_vision.HandSignStabilizer(
+        history_size=5,
+        min_stable_frames=3,
+    )
+
+    assert stabilizer.update(2) == 0
+    assert stabilizer.update(3) == 0
+    assert stabilizer.update(2) == 0
+    assert stabilizer.update(2) == 2
+    assert stabilizer.update(4) == 2
+
+
+def test_finger_detector_counts_raised_fingertips_from_palm_shape():
+    one_finger = np.zeros((220, 220), dtype=np.uint8)
+    cv2.circle(one_finger, (100, 150), 38, 255, -1)
+    cv2.rectangle(one_finger, (92, 55), (108, 145), 255, -1)
+
+    two_fingers = np.zeros((220, 220), dtype=np.uint8)
+    cv2.circle(two_fingers, (100, 150), 38, 255, -1)
+    cv2.rectangle(two_fingers, (76, 55), (92, 145), 255, -1)
+    cv2.rectangle(two_fingers, (108, 55), (124, 145), 255, -1)
+
+    assert hand_sign_vision._detect_fingers(one_finger).count == 1
+    assert hand_sign_vision._detect_fingers(two_fingers).count == 2
