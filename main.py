@@ -1,6 +1,9 @@
+import argparse
+
 import cv2
 
 import blackjack_engine
+from camera_utils import open_camera
 from card_vision import load_templates, read_cards_from_area
 from chip_vision import calculate_bet, count_chips_by_color, optimize_chips
 from config import (
@@ -35,9 +38,17 @@ def choose_robot_orders(handsign, recommended_action, current_bet):
 
 
 def main():
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        print("Nao foi possivel abrir a camera.")
+    parser = argparse.ArgumentParser(description="Blackjack machine vision.")
+    parser.add_argument(
+        "--camera",
+        type=int,
+        default=0,
+        help="Indice da camera usada pelo OpenCV. Padrao: 0.",
+    )
+    args = parser.parse_args()
+
+    cap = open_camera(args.camera)
+    if cap is None:
         return
 
     rank_templates = load_templates(RANK_TEMPLATE_DIR)
@@ -131,13 +142,22 @@ def main():
                 for x, y, w, h in boxes:
                     cv2.rectangle(debug_rois, (x, y), (x + w, y + h), (255, 255, 255), 1)
 
+            cv2.putText(
+                debug_rois,
+                f"Dedos levantados: {handsign}",
+                (20, 70),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.2,
+                (0, 255, 255),
+                3,
+                cv2.LINE_AA,
+            )
             cv2.imshow("Mesa - ROIs", debug_rois)
             cv2.imshow("Cartas Jogador", player_debug)
             cv2.imshow("Cartas Dealer", dealer_debug)
             cv2.imshow("Threshold Jogador", player_thresh)
             cv2.imshow("Threshold Dealer", dealer_thresh)
             cv2.imshow("Fichas", chip_debug)
-            cv2.imshow("Sinal de Mao", hand_debug)
 
             if hand_mask is not None:
                 cv2.imshow("Mascara Pele", hand_mask)
