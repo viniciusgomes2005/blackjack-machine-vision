@@ -78,6 +78,12 @@ SKIN_HSV_UPPER = (25, 180, 255)
 HAND_MIN_AREA = 2500
 DOUBLE_DOWN_SECONDS = 3.0
 
+# A mao so conta quando estiver dentro da area azul. A mascara azul e
+# reconstruida a partir dos pedacos visiveis, porque mao/braco podem esconder
+# parte da marcacao.
+BLUE_HAND_ZONE_MIN_AREA = 700
+BLUE_HAND_ZONE_DILATE_PX = 28
+
 # Controles de debug.
 SHOW_DEBUG_WINDOWS = True
 PRINT_EVERY_FRAME = True

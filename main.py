@@ -158,9 +158,10 @@ def main():
             cv2.imshow("Threshold Jogador", player_thresh)
             cv2.imshow("Threshold Dealer", dealer_thresh)
             cv2.imshow("Fichas", chip_debug)
+            cv2.imshow("Sinal de Mao", hand_debug)
 
             if hand_mask is not None:
-                cv2.imshow("Mascara Pele", hand_mask)
+                cv2.imshow("Mascara Pele na Area Azul", hand_mask)
 
             for color, mask in chip_masks.items():
                 cv2.imshow(f"Mascara Ficha {color}", mask)

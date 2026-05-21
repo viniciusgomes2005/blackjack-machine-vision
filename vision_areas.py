@@ -50,19 +50,29 @@ def draw_rois(frame, rois):
     return debug
 
 
-def _mask_from_ranges(hsv, ranges):
+def mask_from_hsv_ranges(hsv, ranges, kernel_size=5):
+    """Cria uma mascara limpa para uma ou mais faixas HSV."""
+    _require_cv2()
     mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
 
     for lower, upper in ranges:
         mask = cv2.bitwise_or(
             mask,
-            cv2.inRange(hsv, np.array(lower, dtype=np.uint8), np.array(upper, dtype=np.uint8)),
+            cv2.inRange(
+                hsv,
+                np.array(lower, dtype=np.uint8),
+                np.array(upper, dtype=np.uint8),
+            ),
         )
 
-    kernel = np.ones((5, 5), np.uint8)
+    kernel = np.ones((kernel_size, kernel_size), np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
     return mask
+
+
+def _mask_from_ranges(hsv, ranges):
+    return mask_from_hsv_ranges(hsv, ranges)
 
 
 def detect_colored_tape_areas(frame):
