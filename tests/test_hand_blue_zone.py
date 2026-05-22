@@ -38,12 +38,25 @@ def test_blue_hand_zone_is_inferred_from_irregular_area():
     assert hand_zone.mask[20, 300] == 0
 
 
+def test_blue_hand_zone_ignores_smaller_blue_objects_nearby():
+    frame = _frame_with_irregular_blue_zone()
+    cv2.rectangle(frame, (255, 25), (305, 75), (255, 0, 0), -1)
+
+    hand_zone = hand_sign_vision.infer_blue_hand_zone(frame)
+
+    assert hand_zone.found is True
+    assert hand_zone.mask[120, 110] == 255
+    assert hand_zone.mask[50, 280] == 0
+    assert hand_zone.blue_mask[50, 280] == 0
+
+
 def test_hand_sign_only_counts_skin_inside_blue_zone(monkeypatch):
     def fake_detect_fingers(mask):
         count = 4 if cv2.countNonZero(mask) > 0 else 0
         return hand_sign_vision.FingerDetection(count, None, None, 0.0, ())
 
     monkeypatch.setattr(hand_sign_vision, "_detect_fingers", fake_detect_fingers)
+    monkeypatch.setattr(hand_sign_vision, "_dataset_classifier", lambda: None)
 
     inside = _frame_with_irregular_blue_zone()
     cv2.rectangle(inside, (85, 85), (150, 170), _skin_bgr(), -1)

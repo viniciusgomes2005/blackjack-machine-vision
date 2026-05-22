@@ -28,11 +28,11 @@ def choose_robot_orders(handsign, recommended_action, current_bet):
     if handsign == 1:
         return orders_from_action("hit")
     if handsign == 2:
-        return orders_from_action("stand")
+        return orders_from_action("split")
     if handsign == 3:
         return orders_from_action("double", optimize_chips(current_bet, CHIP_VALUES))
     if handsign == 4:
-        return orders_from_action("split")
+        return orders_from_action("stand")
 
     return orders_from_action(recommended_action, optimize_chips(current_bet, CHIP_VALUES))
 
@@ -45,7 +45,18 @@ def main():
         default=0,
         help="Indice da camera usada pelo OpenCV. Padrao: 0.",
     )
+    parser.add_argument(
+        "--single-card-camera",
+        action="store_true",
+        help="Usa o reconhecedor validado de uma carta isolada e encerra.",
+    )
     args = parser.parse_args()
+
+    if args.single_card_camera:
+        from single_card_vision import analyze_webcam
+
+        analyze_webcam(camera_index=args.camera)
+        return
 
     cap = open_camera(args.camera)
     if cap is None:

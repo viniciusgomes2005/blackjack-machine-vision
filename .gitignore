@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 .venv/
 .pytest_cache/
+debug_reconhecimento_otimizado/
+debug_hand_sign/
+relatorio_reconhecimento_otimizado.txt
