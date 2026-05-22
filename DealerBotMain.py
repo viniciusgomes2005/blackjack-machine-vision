@@ -86,7 +86,10 @@ class DealerBotController:
 
         cap = open_camera(self.camera_index)
         if cap is None:
-            raise RuntimeError(f"nao foi possivel abrir a camera {self.camera_index}")
+            print(f"Erro: nao foi possivel usar a camera {self.camera_index}.")
+            print("Tente outro indice com --camera N ou confira se a camera USB")
+            print("esta liberando imagem no aplicativo Camera do Windows.")
+            return
 
         if self.send_robot:
             from ur_robot_bridge import RobotDirectClient
@@ -181,7 +184,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--show",
         action="store_true",
-        help="Mostra janelas de debug da area azul e mascara de pele.",
+        help="Mostra janelas de debug da area vermelha e mascara de pele.",
     )
     parser.add_argument(
         "--send-robot",

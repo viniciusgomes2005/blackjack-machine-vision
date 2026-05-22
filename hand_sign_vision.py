@@ -12,9 +12,10 @@ except ModuleNotFoundError:
     cv2 = None
 
 from config import (
-    BLUE_HAND_ZONE_DILATE_PX,
-    BLUE_HAND_ZONE_MIN_AREA,
     DOUBLE_DOWN_SECONDS,
+    HAND_ZONE_COLOR,
+    HAND_ZONE_DILATE_PX,
+    HAND_ZONE_MIN_AREA,
     HAND_SIGN_HISTORY_SIZE,
     HAND_SIGN_MIN_STABLE_FRAMES,
     HAND_MIN_AREA,
@@ -23,6 +24,7 @@ from config import (
     SKIN_HSV_UPPER,
     SKIN_YCRCB_LOWER,
     SKIN_YCRCB_UPPER,
+    USE_HAND_DATASET_CLASSIFIER,
 )
 from camera_utils import open_camera
 from vision_areas import mask_from_hsv_ranges
@@ -97,11 +99,16 @@ class HandSignStabilizer:
 
 @dataclass(frozen=True)
 class HandZone:
-    """Mascara inferida da area azul onde sinais de mao sao validos."""
+    """Mascara inferida da area colorida onde sinais de mao sao validos."""
 
     mask: np.ndarray
-    blue_mask: np.ndarray
+    zone_color_mask: np.ndarray
     found: bool
+
+    @property
+    def blue_mask(self):
+        """Compatibilidade com chamadas antigas."""
+        return self.zone_color_mask
 
 
 @dataclass(frozen=True)
@@ -152,11 +159,11 @@ def _skin_mask(hand_area):
     return mask
 
 
-def _selected_blue_component(blue_mask):
+def _selected_hand_zone_component(zone_color_mask):
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
-    clean = cv2.morphologyEx(blue_mask, cv2.MORPH_OPEN, kernel)
+    clean = cv2.morphologyEx(zone_color_mask, cv2.MORPH_OPEN, kernel)
 
-    join_px = max(8, min(18, int(BLUE_HAND_ZONE_DILATE_PX * 0.6)))
+    join_px = max(8, min(18, int(HAND_ZONE_DILATE_PX * 0.6)))
     join_kernel = cv2.getStructuringElement(
         cv2.MORPH_ELLIPSE,
         (2 * join_px + 1, 2 * join_px + 1),
@@ -169,7 +176,7 @@ def _selected_blue_component(blue_mask):
         cv2.RETR_EXTERNAL,
         cv2.CHAIN_APPROX_SIMPLE,
     )
-    height, width = blue_mask.shape
+    height, width = zone_color_mask.shape
     best = None
     best_score = 0.0
 
@@ -178,11 +185,15 @@ def _selected_blue_component(blue_mask):
         if w == 0 or h == 0:
             continue
 
-        component_mask = np.zeros(blue_mask.shape, dtype=np.uint8)
+        component_mask = np.zeros(zone_color_mask.shape, dtype=np.uint8)
         cv2.drawContours(component_mask, [contour], -1, 255, -1)
-        selected_pixels = cv2.bitwise_and(blue_mask, blue_mask, mask=component_mask)
-        blue_area = cv2.countNonZero(selected_pixels)
-        if blue_area < BLUE_HAND_ZONE_MIN_AREA:
+        selected_pixels = cv2.bitwise_and(
+            zone_color_mask,
+            zone_color_mask,
+            mask=component_mask,
+        )
+        zone_color_area = cv2.countNonZero(selected_pixels)
+        if zone_color_area < HAND_ZONE_MIN_AREA:
             continue
 
         aspect = w / h
@@ -193,8 +204,8 @@ def _selected_blue_component(blue_mask):
         center_x = (x + w / 2) / max(1, width)
         center_y = (y + h / 2) / max(1, height)
         lower_left_prior = 1.0 + 0.20 * center_y + 0.12 * (1.0 - center_x)
-        compactness = min(1.0, blue_area / max(1, bbox_area * 0.18))
-        score = blue_area * compactness * lower_left_prior
+        compactness = min(1.0, zone_color_area / max(1, bbox_area * 0.18))
+        score = zone_color_area * compactness * lower_left_prior
 
         if score > best_score:
             best_score = score
@@ -203,9 +214,9 @@ def _selected_blue_component(blue_mask):
     return best
 
 
-def _solid_zone_from_blue_pixels(selected_blue):
-    points = cv2.findNonZero(selected_blue)
-    zone_mask = np.zeros(selected_blue.shape, dtype=np.uint8)
+def _solid_zone_from_color_pixels(selected_pixels):
+    points = cv2.findNonZero(selected_pixels)
+    zone_mask = np.zeros(selected_pixels.shape, dtype=np.uint8)
 
     if points is None or len(points) < 4:
         return zone_mask
@@ -216,7 +227,7 @@ def _solid_zone_from_blue_pixels(selected_blue):
     if width <= 0 or height <= 0:
         return zone_mask
 
-    expand = max(8, int(BLUE_HAND_ZONE_DILATE_PX * 0.7))
+    expand = max(8, int(HAND_ZONE_DILATE_PX * 0.7))
     rect = (center, (width + 2 * expand, height + 2 * expand), angle)
     box = cv2.boxPoints(rect).astype(np.int32)
     cv2.fillConvexPoly(zone_mask, box, 255)
@@ -225,27 +236,32 @@ def _solid_zone_from_blue_pixels(selected_blue):
     return cv2.morphologyEx(zone_mask, cv2.MORPH_CLOSE, close_kernel)
 
 
-def infer_blue_hand_zone(hand_area):
+def infer_hand_zone(hand_area):
     """
-    Reconstroi a area azul mesmo quando uma parte esta escondida pela mao.
+    Reconstroi a area colorida mesmo quando uma parte esta escondida pela mao.
 
-    A cena deve ter um unico quadrado azul valido. Manchas azuis menores sao
+    A cena deve ter um unico quadrado valido. Manchas menores da mesma cor sao
     ignoradas; a mascara final e um preenchimento solido do candidato dominante.
     """
     _require_cv2()
     hsv = cv2.cvtColor(hand_area, cv2.COLOR_BGR2HSV)
-    blue_mask = mask_from_hsv_ranges(hsv, HSV_RANGES["blue_tape"], kernel_size=7)
-    zone_mask = np.zeros(blue_mask.shape, dtype=np.uint8)
-    selected_blue = _selected_blue_component(blue_mask)
+    color_mask = mask_from_hsv_ranges(hsv, HSV_RANGES[HAND_ZONE_COLOR], kernel_size=7)
+    zone_mask = np.zeros(color_mask.shape, dtype=np.uint8)
+    selected_pixels = _selected_hand_zone_component(color_mask)
 
-    if selected_blue is None:
-        return HandZone(mask=zone_mask, blue_mask=blue_mask, found=False)
+    if selected_pixels is None:
+        return HandZone(mask=zone_mask, zone_color_mask=color_mask, found=False)
 
-    zone_mask = _solid_zone_from_blue_pixels(selected_blue)
+    zone_mask = _solid_zone_from_color_pixels(selected_pixels)
     if cv2.countNonZero(zone_mask) == 0:
-        return HandZone(mask=zone_mask, blue_mask=selected_blue, found=False)
+        return HandZone(mask=zone_mask, zone_color_mask=selected_pixels, found=False)
 
-    return HandZone(mask=zone_mask, blue_mask=selected_blue, found=True)
+    return HandZone(mask=zone_mask, zone_color_mask=selected_pixels, found=True)
+
+
+def infer_blue_hand_zone(hand_area):
+    """Compatibilidade: a area fisica agora e vermelha."""
+    return infer_hand_zone(hand_area)
 
 
 def _apply_allowed_zone(mask, allowed_mask):
@@ -261,7 +277,7 @@ def _apply_allowed_zone(mask, allowed_mask):
 
 def _hand_feature_vector(image, hand_zone):
     """
-    Assinatura visual normalizada da area azul.
+    Assinatura visual normalizada da area colorida.
 
     Ela combina aparencia da area do quadrado, mascara de pele e medidas
     geometricas. A base Sinais/ usa essa assinatura para calibrar a leitura sem
@@ -527,6 +543,11 @@ def _refine_finger_count(contour, palm_center, palm_radius, raw_count):
     )
 
     if raw_count <= 3:
+        if shallow_gaps >= 2:
+            return 3
+        x, y, w, h = cv2.boundingRect(contour)
+        if shallow_gaps == 0 and right_ratio < 0.35 and w > h:
+            return 0
         if right_ratio <= 0.646:
             return 1 if shallow_gaps == 0 else 2
         return 2 if raw_count <= 2 else 3
@@ -613,7 +634,7 @@ def read_finger_count(hand_area, debug=False, allowed_mask=None):
 
 
 def analyze_hand_image(image, debug=False):
-    """Detecta o quadrado azul e conta dedos apenas dentro dele."""
+    """Detecta o quadrado vermelho e conta dedos apenas dentro dele."""
     hand_zone = infer_blue_hand_zone(image)
 
     if not hand_zone.found:
@@ -622,7 +643,7 @@ def analyze_hand_image(image, debug=False):
             debug_img = image.copy()
             cv2.putText(
                 debug_img,
-                "quadrado azul nao detectado",
+                "quadrado vermelho nao detectado",
                 (20, 40),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 1.0,
@@ -633,7 +654,7 @@ def analyze_hand_image(image, debug=False):
             return None, debug_img, empty_mask
         return None
 
-    classifier = _dataset_classifier()
+    classifier = _dataset_classifier() if USE_HAND_DATASET_CLASSIFIER else None
     calibrated_count = None
     if classifier is not None:
         calibrated_label = classifier.predict(image, hand_zone)
@@ -652,14 +673,14 @@ def analyze_hand_image(image, debug=False):
 
     if debug:
         overlay = debug_img.copy()
-        overlay[hand_zone.mask > 0] = (255, 0, 0)
+        overlay[hand_zone.mask > 0] = (0, 0, 255)
         debug_img = cv2.addWeighted(overlay, 0.22, debug_img, 0.78, 0)
-        blue_contours, _ = cv2.findContours(
+        zone_contours, _ = cv2.findContours(
             hand_zone.blue_mask,
             cv2.RETR_EXTERNAL,
             cv2.CHAIN_APPROX_SIMPLE,
         )
-        cv2.drawContours(debug_img, blue_contours, -1, (255, 0, 0), 2)
+        cv2.drawContours(debug_img, zone_contours, -1, (0, 0, 255), 2)
 
         label = str(count) if count is not None else "vazio"
         cv2.putText(
@@ -668,7 +689,7 @@ def analyze_hand_image(image, debug=False):
             (20, 80),
             cv2.FONT_HERSHEY_SIMPLEX,
             1.2,
-            (0, 255, 255),
+            (0, 0, 255),
             3,
             cv2.LINE_AA,
         )
@@ -744,7 +765,11 @@ def capture_hand_image_webcam(
 
         preview = frame.copy()
         hand_zone = infer_blue_hand_zone(preview)
-        zone_label = "quadrado azul OK" if hand_zone.found else "quadrado azul NAO detectado"
+        zone_label = (
+            "quadrado vermelho OK"
+            if hand_zone.found
+            else "quadrado vermelho NAO detectado"
+        )
         zone_color = (0, 255, 0) if hand_zone.found else (0, 0, 255)
         if hand_zone.found:
             contours, _ = cv2.findContours(
@@ -752,18 +777,18 @@ def capture_hand_image_webcam(
                 cv2.RETR_EXTERNAL,
                 cv2.CHAIN_APPROX_SIMPLE,
             )
-            cv2.drawContours(preview, contours, -1, (255, 0, 0), 2)
+            cv2.drawContours(preview, contours, -1, (0, 0, 255), 2)
             overlay = preview.copy()
-            overlay[hand_zone.mask > 0] = (255, 0, 0)
+            overlay[hand_zone.mask > 0] = (0, 0, 255)
             preview = cv2.addWeighted(overlay, 0.18, preview, 0.82, 0)
 
         cv2.putText(
             preview,
-            "Mao no quadrado azul | ESPACO = capturar e salvar | ESC = sair",
+            "Mao no quadrado vermelho | ESPACO = capturar e salvar | ESC = sair",
             (20, 40),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.9,
-            (0, 255, 255),
+            (0, 0, 255),
             2,
             cv2.LINE_AA,
         )
@@ -913,7 +938,7 @@ def read_hand_sign(
             debug_img = hand_area.copy()
             cv2.putText(
                 debug_img,
-                "area azul nao encontrada",
+                "area vermelha nao encontrada",
                 (10, 35),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.8,
@@ -924,7 +949,11 @@ def read_hand_sign(
             return 0, 0, debug_img, empty_mask
         return 0, 0
 
-    classifier = _dataset_classifier() if require_blue_area and hand_zone is not None else None
+    classifier = (
+        _dataset_classifier()
+        if USE_HAND_DATASET_CLASSIFIER and require_blue_area and hand_zone is not None
+        else None
+    )
     calibrated_fingers = None
     if classifier is not None:
         calibrated_label = classifier.predict(hand_area, hand_zone)
@@ -952,12 +981,12 @@ def read_hand_sign(
     if debug:
         if hand_zone is not None and hand_zone.found:
             overlay = debug_img.copy()
-            overlay[hand_zone.mask > 0] = (255, 0, 0)
+            overlay[hand_zone.mask > 0] = (0, 0, 255)
             debug_img = cv2.addWeighted(overlay, 0.25, debug_img, 0.75, 0)
-            blue_contours, _ = cv2.findContours(
+            zone_contours, _ = cv2.findContours(
                 hand_zone.blue_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
             )
-            cv2.drawContours(debug_img, blue_contours, -1, (255, 0, 0), 2)
+            cv2.drawContours(debug_img, zone_contours, -1, (0, 0, 255), 2)
         if stabilizer is not None:
             cv2.putText(
                 debug_img,

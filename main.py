@@ -174,7 +174,7 @@ def main():
             cv2.imshow("Sinal de Mao", hand_debug)
 
             if hand_mask is not None:
-                cv2.imshow("Mascara Pele na Area Azul", hand_mask)
+                cv2.imshow("Mascara Pele na Area Vermelha", hand_mask)
 
             for color, mask in chip_masks.items():
                 cv2.imshow(f"Mascara Ficha {color}", mask)

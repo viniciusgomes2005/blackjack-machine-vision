@@ -32,7 +32,7 @@ python single_card_vision.py --image caminho/para/foto.jpg
 python single_card_vision.py --bank Base_de_dado_renomeada
 ```
 
-Para testar o reconhecedor de sinais de mao no quadrado azul:
+Para testar o reconhecedor de sinais de mao no quadrado vermelho:
 
 ```bash
 python hand_sign_vision.py --camera 0
@@ -44,7 +44,7 @@ apertar `Espaco` varias vezes; `Esc` sai.
 
 As imagens com nomes `1Dedo...`, `2Dedo...`, `3Dedo...`, `4Dedo...`,
 `5Dedo...` e `Vazio...` em `Sinais/` tambem funcionam como base de calibracao
-visual. O classificador usa a aparencia da mao dentro do quadrado azul e nao o
+visual. O classificador usa a aparencia da mao dentro do quadrado vermelho e nao o
 nome do arquivo no momento da inferencia.
 
 Se voce ja souber o rotulo real do teste, salve direto como parte da base
@@ -74,7 +74,7 @@ O script principal preparado para a logica do jogo e:
 python DealerBotMain.py --camera 0 --hand-interval 5
 ```
 
-Ele abre a camera, analisa o quadrado azul a cada 5 segundos e imprime no
+Ele abre a camera, analisa o quadrado vermelho a cada 5 segundos e imprime no
 terminal a decisao detectada:
 
 | Dedos | Acao |
@@ -85,7 +85,7 @@ terminal a decisao detectada:
 | 4 | stand |
 | 5 ou vazio | sem acao |
 
-Para ver as janelas de debug da area azul e da mascara de pele:
+Para ver as janelas de debug da area vermelha e da mascara de pele:
 
 ```bash
 python DealerBotMain.py --camera 0 --hand-interval 5 --show
@@ -121,19 +121,17 @@ Ele expoe os Input Registers que o programa PolyScope le como entradas:
 | 133 | splitBC |
 | 134 | splitAC |
 
-Para liberar o inicio da partida pelo `startprog` (DI4 / register 128):
+Para liberar o inicio da partida pelo `startprog` (DI4 / register 128), o
+script conecta diretamente no controlador UR em `10.103.18.245:502`:
 
 ```bash
 python ur_robot_bridge.py --no-ur-read --startprog
 ```
 
-Por padrao, o script escuta em `10.102.28.161:31415`. No PolyScope, configure
-o cliente Modbus para esse mesmo IP e essa mesma porta.
-O IP do controlador UR usado para leitura futura de `foto`/`busyIO` e
-`10.103.18.245`.
+`--no-ur-read` pode ficar no comando por compatibilidade; no modo direto ele
+apenas evita subir o servidor Modbus do PC.
 
-Se a configuracao do robo espera que o PC conecte diretamente no IP do UR,
-use o modo cliente direto:
+O modo cliente direto tambem pode ser chamado explicitamente:
 
 ```bash
 python ur_robot_bridge.py --direct-to-robot --startprog --hold 5 --no-interactive
@@ -168,13 +166,11 @@ ur-direct> set startprog false
 ur-direct> status
 ```
 
-No modo interativo, use:
+Se a configuracao antiga do robo espera conectar no PC como servidor Modbus,
+force esse modo com:
 
-```text
-ur> start
-ur> hit
-ur> stand
-ur> status
+```bash
+python ur_robot_bridge.py --server-mode --pc-host 0.0.0.0 --no-ur-read
 ```
 
 Se a leitura das saidas `foto`/`busyIO` do robo ainda nao estiver configurada,

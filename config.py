@@ -82,11 +82,17 @@ DOUBLE_DOWN_SECONDS = 3.0
 HAND_SIGN_HISTORY_SIZE = 7
 HAND_SIGN_MIN_STABLE_FRAMES = 4
 
-# A mao so conta quando estiver dentro da area azul. A mascara azul e
+# A mao so conta quando estiver dentro da area vermelha. A mascara vermelha e
 # reconstruida a partir dos pedacos visiveis, porque mao/braco podem esconder
 # parte da marcacao.
-BLUE_HAND_ZONE_MIN_AREA = 700
-BLUE_HAND_ZONE_DILATE_PX = 28
+HAND_ZONE_COLOR = "red_tape"
+HAND_ZONE_MIN_AREA = 700
+HAND_ZONE_DILATE_PX = 28
+USE_HAND_DATASET_CLASSIFIER = False
+
+# Aliases antigos mantidos para compatibilidade com codigo/testes existentes.
+BLUE_HAND_ZONE_MIN_AREA = HAND_ZONE_MIN_AREA
+BLUE_HAND_ZONE_DILATE_PX = HAND_ZONE_DILATE_PX
 
 # Controles de debug.
 SHOW_DEBUG_WINDOWS = True

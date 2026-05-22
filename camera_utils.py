@@ -4,7 +4,7 @@ except ModuleNotFoundError:
     cv2 = None
 
 
-REQUESTED_RESOLUTIONS = ((1920, 1080), (1280, 720))
+REQUESTED_RESOLUTIONS = ((1920, 1080), (1280, 720), (640, 480), (320, 240))
 
 
 def _require_cv2():
@@ -71,9 +71,13 @@ def open_camera(camera_index=0, requested_resolutions=REQUESTED_RESOLUTIONS):
             print("Aviso: camera abriu, mas nao retornou frame nessa resolucao.")
 
     if last_success is None:
-        print("Aviso: camera abriu, mas nao retornou frame em nenhuma resolucao testada.")
-    else:
-        width, height = last_success
-        print(f"Usando a melhor resolucao disponivel apos solicitar {width}x{height}.")
+        print("Erro: camera abriu, mas nao retornou frame em nenhuma resolucao testada.")
+        print("Verifique se a camera esta ocupada por outro app, permissoes do Windows,")
+        print("ou se o indice escolhido realmente corresponde a uma camera com imagem.")
+        cap.release()
+        return None
+
+    width, height = last_success
+    print(f"Usando a melhor resolucao disponivel apos solicitar {width}x{height}.")
 
     return cap

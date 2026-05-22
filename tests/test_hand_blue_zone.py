@@ -7,13 +7,13 @@ cv2 = pytest.importorskip("cv2")
 
 
 def _skin_bgr():
-    hsv = np.uint8([[[10, 100, 210]]])
+    hsv = np.uint8([[[12, 100, 210]]])
     return tuple(int(channel) for channel in cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)[0, 0])
 
 
-def _frame_with_irregular_blue_zone():
+def _frame_with_irregular_red_zone():
     frame = np.zeros((240, 320, 3), dtype=np.uint8)
-    blue_polygon = np.array(
+    red_polygon = np.array(
         [
             [35, 55],
             [170, 35],
@@ -24,12 +24,12 @@ def _frame_with_irregular_blue_zone():
         ],
         dtype=np.int32,
     )
-    cv2.fillPoly(frame, [blue_polygon], (255, 0, 0))
+    cv2.fillPoly(frame, [red_polygon], (0, 0, 255))
     return frame
 
 
-def test_blue_hand_zone_is_inferred_from_irregular_area():
-    frame = _frame_with_irregular_blue_zone()
+def test_red_hand_zone_is_inferred_from_irregular_area():
+    frame = _frame_with_irregular_red_zone()
 
     hand_zone = hand_sign_vision.infer_blue_hand_zone(frame)
 
@@ -38,9 +38,9 @@ def test_blue_hand_zone_is_inferred_from_irregular_area():
     assert hand_zone.mask[20, 300] == 0
 
 
-def test_blue_hand_zone_ignores_smaller_blue_objects_nearby():
-    frame = _frame_with_irregular_blue_zone()
-    cv2.rectangle(frame, (255, 25), (305, 75), (255, 0, 0), -1)
+def test_red_hand_zone_ignores_smaller_red_objects_nearby():
+    frame = _frame_with_irregular_red_zone()
+    cv2.rectangle(frame, (255, 25), (305, 75), (0, 0, 255), -1)
 
     hand_zone = hand_sign_vision.infer_blue_hand_zone(frame)
 
@@ -50,7 +50,7 @@ def test_blue_hand_zone_ignores_smaller_blue_objects_nearby():
     assert hand_zone.blue_mask[50, 280] == 0
 
 
-def test_hand_sign_only_counts_skin_inside_blue_zone(monkeypatch):
+def test_hand_sign_only_counts_skin_inside_red_zone(monkeypatch):
     def fake_detect_fingers(mask):
         count = 4 if cv2.countNonZero(mask) > 0 else 0
         return hand_sign_vision.FingerDetection(count, None, None, 0.0, ())
@@ -58,10 +58,10 @@ def test_hand_sign_only_counts_skin_inside_blue_zone(monkeypatch):
     monkeypatch.setattr(hand_sign_vision, "_detect_fingers", fake_detect_fingers)
     monkeypatch.setattr(hand_sign_vision, "_dataset_classifier", lambda: None)
 
-    inside = _frame_with_irregular_blue_zone()
+    inside = _frame_with_irregular_red_zone()
     cv2.rectangle(inside, (85, 85), (150, 170), _skin_bgr(), -1)
 
-    outside = _frame_with_irregular_blue_zone()
+    outside = _frame_with_irregular_red_zone()
     cv2.rectangle(outside, (240, 85), (300, 170), _skin_bgr(), -1)
 
     assert hand_sign_vision.read_hand_sign(

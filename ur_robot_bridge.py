@@ -13,6 +13,15 @@ DEFAULT_SIGNAL_ADDRESSES = {
     "splitBC": 133,
     "splitAC": 134,
 }
+LEGACY_SIGNAL_ADDRESSES = {
+    "hit": 0,
+    "splitAB": 1,
+    "double": 2,
+    "startprog": 3,
+    "stand": 4,
+    "splitBC": 5,
+    "splitAC": 6,
+}
 
 ACTION_SIGNALS = {"hit", "splitAB", "double", "stand", "splitBC", "splitAC"}
 
@@ -69,6 +78,14 @@ def parse_signal_assignment(raw: str) -> tuple[str, bool]:
         raise ValueError(f"sinal desconhecido: {name}. Validos: {valid}")
 
     return name, parse_bool(value)
+
+
+def _should_use_direct_mode(args) -> bool:
+    if args.direct_to_robot:
+        return True
+    if args.server_mode:
+        return False
+    return bool(args.startprog or args.command or args.set or args.diagnose_start)
 
 
 @dataclass
@@ -254,7 +271,7 @@ class DealerBotBridge:
 
     def start_program(self, hold: float = 0.5, accept_timeout: float = 10.0) -> None:
         """
-        Sobe startprog (DI4 / Input Register 3).
+        Sobe startprog (DI4 / register 128).
 
         Se a leitura de busyIO estiver habilitada, baixa startprog assim que o
         robo ficar ocupado. Sem leitura do UR, segura por `hold` segundos.
@@ -302,11 +319,13 @@ class RobotDirectClient:
         self,
         ur_host: str = DEFAULT_UR_HOST,
         ur_port: int = DEFAULT_UR_PORT,
+        address_mode: str = "standard",
         timeout: float = 1.0,
     ) -> None:
         ModbusClient, _ = _load_modbus()
         self.ur_host = ur_host
         self.ur_port = ur_port
+        self.address_mode = address_mode
         self._client = ModbusClient(
             host=ur_host,
             port=ur_port,
@@ -322,23 +341,36 @@ class RobotDirectClient:
         if name not in DEFAULT_SIGNAL_ADDRESSES:
             raise ValueError(f"sinal desconhecido: {name}")
 
-        address = DEFAULT_SIGNAL_ADDRESSES[name]
+        addresses = self._addresses_for_signal(name)
         int_value = int(bool(value))
         bool_value = bool(value)
+        results = []
 
-        holding_ok = self._client.write_single_register(address, int_value)
-        coil_ok = self._client.write_single_coil(address, bool_value)
+        for label, address in addresses:
+            holding_ok = self._client.write_single_register(address, int_value)
+            coil_ok = self._client.write_single_coil(address, bool_value)
+            results.append((label, address, holding_ok, coil_ok))
 
-        print(
-            f"[ur-direct] {name}={'HI' if value else 'LO'} "
-            f"addr={address} holding_ok={holding_ok} coil_ok={coil_ok}"
-        )
+            print(
+                f"[ur-direct] {name}={'HI' if value else 'LO'} "
+                f"{label}_addr={address} holding_ok={holding_ok} coil_ok={coil_ok}"
+            )
 
-        if not holding_ok and not coil_ok:
+        if not any(holding_ok or coil_ok for _, _, holding_ok, coil_ok in results):
             raise RuntimeError(
                 f"o robo nao aceitou escrita Modbus em {self.ur_host}:{self.ur_port} "
-                f"no endereco {address}"
+                f"para o sinal {name}"
             )
+
+    def _addresses_for_signal(self, name: str) -> list[tuple[str, int]]:
+        if self.address_mode == "standard":
+            return [("standard", DEFAULT_SIGNAL_ADDRESSES[name])]
+        if self.address_mode == "legacy":
+            return [("legacy", LEGACY_SIGNAL_ADDRESSES[name])]
+        return [
+            ("standard", DEFAULT_SIGNAL_ADDRESSES[name]),
+            ("legacy", LEGACY_SIGNAL_ADDRESSES[name]),
+        ]
 
     def start_program(self, hold: float = 0.5) -> None:
         self.set_signal("startprog", True)
@@ -354,10 +386,13 @@ class RobotDirectClient:
         if name not in DEFAULT_SIGNAL_ADDRESSES:
             raise ValueError(f"sinal desconhecido: {name}")
 
-        address = DEFAULT_SIGNAL_ADDRESSES[name]
-        holding = self._client.read_holding_registers(address, 1)
-        coil = self._client.read_coils(address, 1)
-        print(f"[ur-direct] {name} addr={address} holding={holding} coil={coil}")
+        for label, address in self._addresses_for_signal(name):
+            holding = self._client.read_holding_registers(address, 1)
+            coil = self._client.read_coils(address, 1)
+            print(
+                f"[ur-direct] {name} {label}_addr={address} "
+                f"holding={holding} coil={coil}"
+            )
 
 
 def _interactive_loop(bridge: DealerBotBridge) -> None:
@@ -427,7 +462,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--startprog",
         action="store_true",
-        help="Ao iniciar, envia startprog (DI4 / register 3) e depois continua aberto.",
+        help="Ao iniciar, envia startprog (DI4 / register 128).",
     )
     parser.add_argument("--command", choices=["hit", "double", "stand", "splitAB", "splitBC", "splitAC"])
     parser.add_argument(
@@ -450,13 +485,30 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Conecta no IP do robo e escreve diretamente em coils/holding registers.",
     )
+    parser.add_argument(
+        "--server-mode",
+        action="store_true",
+        help="Forca o modo antigo: PC sobe servidor Modbus e o robo conecta no PC.",
+    )
+    parser.add_argument(
+        "--address-mode",
+        choices=["both", "standard", "legacy"],
+        default="standard",
+        help="No modo direto, escreve em 128..134, 0..6 ou ambos. Padrao: standard.",
+    )
     return parser
 
 
 def main() -> None:
     args = build_parser().parse_args()
-    if args.direct_to_robot:
-        client = RobotDirectClient(ur_host=args.ur_host, ur_port=args.ur_port)
+    if _should_use_direct_mode(args):
+        if args.no_ur_read:
+            print("[ur-direct] --no-ur-read recebido; no modo direto ele apenas evita o servidor do PC.")
+        client = RobotDirectClient(
+            ur_host=args.ur_host,
+            ur_port=args.ur_port,
+            address_mode=args.address_mode,
+        )
         try:
             for raw_set in args.set:
                 name, value = parse_signal_assignment(raw_set)
