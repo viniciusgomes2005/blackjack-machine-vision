@@ -4,6 +4,7 @@ from ur_robot_bridge import (
     RobotDirectClient,
     RobotInputs,
     _should_use_direct_mode,
+    build_parser,
 )
 
 
@@ -84,3 +85,10 @@ def test_server_mode_keeps_legacy_pc_server_mode():
         diagnose_start = False
 
     assert _should_use_direct_mode(Args()) is False
+
+
+def test_keep_high_argument_is_available_for_one_shot_commands():
+    args = build_parser().parse_args(["--command", "stand", "--keep-high"])
+
+    assert args.command == "stand"
+    assert args.keep_high is True

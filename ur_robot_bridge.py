@@ -420,7 +420,10 @@ def _interactive_loop(bridge: DealerBotBridge) -> None:
 
 
 def _direct_interactive_loop(client: RobotDirectClient, hold: float) -> None:
-    print("Comandos: start, hit, double, stand, splitAB, splitBC, splitAC, status, set <sinal> <true|false>, quit")
+    print(
+        "Comandos: start, hit, double, stand, splitAB, splitBC, splitAC, "
+        "hold <sinal>, status, set <sinal> <true|false>, quit"
+    )
     while True:
         command = input("ur-direct> ").strip()
         if not command:
@@ -436,6 +439,16 @@ def _direct_interactive_loop(client: RobotDirectClient, hold: float) -> None:
             continue
         if command in ACTION_SIGNALS:
             client.pulse_signal(command, hold=hold)
+            continue
+        if command.startswith("hold "):
+            parts = command.split()
+            if len(parts) != 2:
+                print("Uso: hold <sinal>")
+                continue
+            try:
+                client.set_signal(parts[1], True)
+            except ValueError as exc:
+                print(f"Erro: {exc}")
             continue
         if command.startswith("set "):
             parts = command.split()
@@ -473,6 +486,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Define um sinal explicitamente, ex: --set startprog=true --set hit=false.",
     )
     parser.add_argument("--hold", type=float, default=0.5, help="Tempo de HI quando nao houver leitura do UR.")
+    parser.add_argument(
+        "--keep-high",
+        action="store_true",
+        help="Com --command, deixa o sinal em HI em vez de baixa-lo apos --hold.",
+    )
     parser.add_argument("--accept-timeout", type=float, default=10.0, help="Timeout esperando busyIO=HI.")
     parser.add_argument("--no-interactive", action="store_true", help="Sai apos executar --startprog/--command.")
     parser.add_argument(
@@ -524,8 +542,11 @@ def main() -> None:
                 client.start_program(hold=args.hold)
             elif args.command:
                 client.set_signal(args.command, True)
-                time.sleep(args.hold)
-                client.set_signal(args.command, False)
+                if args.keep_high:
+                    print(f"[ur-direct] {args.command} mantido em HI.")
+                else:
+                    time.sleep(args.hold)
+                    client.set_signal(args.command, False)
             else:
                 _direct_interactive_loop(client, hold=args.hold)
         except KeyboardInterrupt:
