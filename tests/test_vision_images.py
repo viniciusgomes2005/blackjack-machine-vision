@@ -107,3 +107,53 @@ def test_expected_ranks_for_first_reference_images():
 
         assert expected["player_cards"].issubset(player_ranks)
         assert dealer_ranks.intersection(expected["dealer_cards"])
+
+
+def test_one_round_simulation_uses_card_and_hand_image_recognition():
+    from blackjack_engine import RESULT_LOSE
+    from main import simulate_round_from_files
+
+    summary = simulate_round_from_files(
+        IMAGE_DIR / "table_round_01_player_QS_5S_dealer_2H_3S.jpeg",
+        [Path("Sinais") / "4Dedo1.jpg"],
+        dealer_hole="3S",
+        player_draws=[],
+        dealer_draws=["KH", "6C"],
+    )
+
+    player_ranks = {card["rank"] for card in summary["vision"]["table"]["player_cards"]}
+    dealer_ranks = {card["rank"] for card in summary["vision"]["table"]["dealer_cards"]}
+
+    assert {"Q", "5"}.issubset(player_ranks)
+    assert "2" in dealer_ranks
+    assert summary["vision"]["hand_decisions"][0]["fingers"] == 4
+    assert summary["vision"]["player_actions"] == ["stand"]
+    assert summary["dealer_total"] == 21
+    assert summary["player_hands"][0]["result"] == RESULT_LOSE
+
+
+def test_manual_card_arguments_can_drive_split_round_with_hand_images():
+    from main import simulate_round_from_files
+
+    summary = simulate_round_from_files(
+        round_image=None,
+        hand_images=[
+            Path("Sinais") / "2Dedo1.jpg",
+            Path("Sinais") / "4Dedo1.jpg",
+            Path("Sinais") / "4Dedo2.jpg",
+        ],
+        dealer_hole="10H",
+        player_draws=["3H", "2C"],
+        dealer_draws=["5C"],
+        player_card_codes=["8H", "8D"],
+        dealer_upcard="6S",
+    )
+
+    assert summary["vision"]["table"]["source"] == "manual"
+    assert summary["vision"]["player_actions"] == ["split", "stand", "stand"]
+    assert summary["split_count"] == 1
+    assert [hand["cards"] for hand in summary["player_hands"]] == [
+        ["8 of hearts", "3 of hearts"],
+        ["8 of diamonds", "2 of clubs"],
+    ]
+    assert summary["dealer_total"] == 21

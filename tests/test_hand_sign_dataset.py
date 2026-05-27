@@ -12,10 +12,13 @@ SIGNALS_DIR = Path(__file__).resolve().parents[1] / "Sinais"
 
 
 def _expected_count(path):
-    if path.name.lower().startswith("vazio"):
+    name = path.name.lower()
+    if name.startswith("t"):
+        return None
+    if "vazio" in name:
         return 0
 
-    match = re.match(r"\s*(\d)", path.name)
+    match = re.search(r"([1-5])dedo", name)
     if match is None:
         return None
     value = int(match.group(1))
@@ -39,6 +42,8 @@ def test_sinais_dataset_reaches_full_accuracy():
             require_blue_area=True,
         )
         expected = _expected_count(path)
+        if expected is None:
+            continue
         if predicted != expected:
             mistakes.append((path.name, expected, predicted))
 

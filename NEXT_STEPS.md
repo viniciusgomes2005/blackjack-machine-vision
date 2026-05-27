@@ -618,3 +618,521 @@ Isso isola o problema:
 - se falhar, e fluxo Modbus/PolyScope;
 - se passar, entao o robo e o protocolo estao prontos;
 - depois disso, a visao pode ser conectada com menos incerteza.
+
+---
+
+## 13. Sessao posterior a implementacao da logica correta do Blackjack
+
+Esta secao foi adicionada apos a implementacao do motor correto de Blackjack no
+codigo. A partir daqui, os proximos passos assumem que a regra local do jogo ja
+esta funcional e validada por testes automatizados.
+
+O estado atual e:
+
+- `blackjack_engine.py` contem a regra e o loop do Blackjack.
+- `blackjack_manual_simulator.py` permite simular rodadas sem camera e sem robo.
+- `main.py --simulate-round` permite simular rodadas com imagem da mesa, imagens
+  de sinais de mao ou cartas informadas por argumento.
+- A ponte Modbus existe em `ur_robot_bridge.py`, mas ainda precisa ser conectada
+  ao loop completo da rodada.
+- Falta integrar o fluxo de camera ao vivo com os pulsos `foto`/`busyIO` do
+  robo.
+- Falta adicionar a logica de `startprog` por sinal de mao.
+
+## 14. Proximo objetivo principal
+
+Integrar tres camadas em um unico fluxo:
+
+```text
+visao computacional -> motor de Blackjack -> comunicacao com robo UR
+```
+
+O fluxo final desejado e:
+
+1. Jogador faz sinal de inicio.
+2. Visao reconhece esse sinal.
+3. PC envia `startprog` ao robo.
+4. Robo distribui cartas iniciais.
+5. Robo pulsa `foto` nos momentos em que cartas devem ser reconhecidas.
+6. PC reconhece as cartas.
+7. Motor de Blackjack decide quais acoes sao legais.
+8. Jogador faz sinais de mao para `hit`, `stand`, `split` ou `double`.
+9. PC valida a acao no motor.
+10. Se a acao for legal, PC envia o sinal ao robo.
+11. Robo executa o movimento.
+12. PC atualiza o estado da rodada.
+13. Quando todas as maos do jogador encerram, dealer joga.
+14. PC resolve cada mao contra o dealer.
+
+## 15. Logica de Start Program por 4 dedos
+
+Falta adicionar a logica de `Start program`.
+
+Essa logica substitui a etapa fisica de o jogador jogar a ficha na mesa. Como o
+projeto ainda nao tem uma logica confiavel para detectar a aposta inicial, o
+inicio da rodada deve ser feito por sinal de mao:
+
+```text
+Antes da rodada comecar: 4 dedos esticados = startprog
+Durante a rodada do jogador: 4 dedos esticados = stand
+```
+
+Isso exige uma leitura contextual:
+
+- se o estado do jogo for `waiting_start`, 4 dedos deve gerar `startprog`;
+- se o estado do jogo for `player_turn`, 4 dedos deve gerar `stand`.
+
+Implementacao sugerida:
+
+1. Adicionar um estado de alto nivel no orquestrador, por exemplo:
+   - `waiting_start`;
+   - `initial_deal`;
+   - `player_turn`;
+   - `dealer_turn`;
+   - `finished`.
+2. No estado `waiting_start`, chamar `hand_sign_vision.analyze_hand_image`.
+3. Se detectar 4 dedos de forma estavel, enviar `startprog`.
+4. Aguardar `busyIO` subir para confirmar que o robo aceitou o inicio.
+5. Baixar `startprog`.
+6. Entrar em `initial_deal`.
+
+## 16. Variaveis que o PC deve enviar ao robo
+
+Os sinais enviados ao robo devem continuar alinhados com `ur_robot_bridge.py`.
+
+| Variavel | Direcao | Register atual | Quando enviar |
+| --- | --- | --- | --- |
+| `startprog` | PC -> robo | 128 | inicio da rodada |
+| `hit` | PC -> robo | 129 | acao legal `hit` aceita pelo motor |
+| `double` | PC -> robo | 130 | acao legal `double` aceita pelo motor |
+| `stand` | PC -> robo | 131 | acao legal `stand` aceita pelo motor |
+| `splitAB` | PC -> robo | 132 | split fisico entre posicoes A/B |
+| `splitBC` | PC -> robo | 133 | split fisico entre posicoes B/C |
+| `splitAC` | PC -> robo | 134 | split fisico entre posicoes A/C |
+
+Observacao importante:
+
+O motor de Blackjack conhece apenas a acao logica `split`. A traducao para
+`splitAB`, `splitBC` ou `splitAC` deve acontecer no orquestrador fisico, porque
+depende da posicao real da mao na mesa e de como o PolyScope espera receber o
+split.
+
+## 17. Variaveis que o robo deve devolver ao PC
+
+| Variavel | Direcao | Uso |
+| --- | --- | --- |
+| `busyIO` | robo -> PC | indica que o robo esta ocupado/executando movimento |
+| `foto` | robo -> PC | indica que a carta esta pronta para captura pela camera |
+
+`busyIO`
+
+Deve ser usado para sincronizacao. O PC so deve enviar uma nova acao quando o
+robo estiver pronto.
+
+Fluxo recomendado:
+
+1. PC aguarda `busyIO == LO`.
+2. PC envia sinal da acao.
+3. PC aguarda `busyIO == HI`.
+4. PC baixa o sinal enviado.
+5. PC aguarda `busyIO == LO` novamente.
+
+`foto`
+
+Deve ser usado para captura de cartas.
+
+Fluxo recomendado:
+
+1. Robo vira uma carta.
+2. Robo pulsa `foto`.
+3. PC detecta borda de subida de `foto`.
+4. PC captura frame da camera.
+5. PC reconhece a carta.
+6. PC adiciona a carta ao estado da rodada.
+
+## 18. Integracao por arquivo
+
+### `blackjack_engine.py`
+
+Responsabilidade:
+
+- manter regra do jogo;
+- validar acoes legais;
+- aplicar transicoes de estado;
+- controlar split/double/hit/stand;
+- controlar turno do dealer;
+- resolver resultado.
+
+O que precisa receber:
+
+- cartas iniciais reconhecidas;
+- cartas compradas pelo jogador;
+- cartas compradas pelo dealer;
+- acoes externas do jogador.
+
+O que deve devolver:
+
+- estado atual da rodada;
+- mao ativa;
+- acoes legais;
+- eventos da rodada;
+- resultado final.
+
+Nao deve receber Modbus diretamente. Ele deve continuar independente do robo.
+
+### `main.py`
+
+Responsabilidade atual:
+
+- pipeline principal de visao;
+- simulacao com imagens;
+- simulacao com cartas por argumento;
+- ponto natural para futuramente virar o orquestrador principal.
+
+Proximo passo:
+
+- adicionar um modo de orquestracao real, por exemplo `--robot-round`;
+- esse modo deve integrar camera, motor e `ur_robot_bridge.py`.
+
+O que deve puxar da camera:
+
+- cartas do jogador;
+- carta aberta do dealer;
+- cartas futuras apos `hit`, `double` e `split`;
+- carta fechada do dealer apos revelacao;
+- sinais de mao.
+
+O que deve enviar ao robo:
+
+- `startprog`;
+- `hit`;
+- `stand`;
+- `double`;
+- `splitAB`/`splitBC`/`splitAC`.
+
+O que deve receber do robo:
+
+- `busyIO`;
+- `foto`.
+
+### `blackjack_manual_simulator.py`
+
+Responsabilidade:
+
+- validar regra e loop sem camera;
+- simular cenarios manuais;
+- ajudar a reproduzir bugs de regra.
+
+Nao deve ser ligado ao robo. Ele e uma bancada de teste.
+
+### `DealerBotMain.py`
+
+Responsabilidade atual:
+
+- ler camera;
+- reconhecer sinal de mao;
+- converter dedos para acao;
+- opcionalmente enviar pulso direto ao robo.
+
+Proximo passo:
+
+- deixar de ser apenas um emissor simples de pulso;
+- passar a respeitar o estado do motor;
+- implementar a leitura contextual de 4 dedos:
+  - antes da rodada: `startprog`;
+  - durante a rodada: `stand`.
+
+Variaveis importantes:
+
+- `HandDecision.fingers`;
+- `HandDecision.action`;
+- `HandDecision.robot_signal`.
+
+### `hand_sign_vision.py`
+
+Responsabilidade:
+
+- reconhecer o numero de dedos;
+- detectar area vermelha;
+- retornar `1`, `2`, `3`, `4`, `5` ou vazio.
+
+Integracao futura:
+
+- usar estabilizacao antes de aceitar uma acao;
+- diferenciar significado de 4 dedos pelo estado do jogo;
+- melhorar robustez das imagens `T*.jpg` e `Vazio`.
+
+Mapeamento contextual desejado:
+
+| Estado do jogo | Dedos | Acao |
+| --- | --- | --- |
+| `waiting_start` | 4 | `startprog` |
+| `player_turn` | 1 | `hit` |
+| `player_turn` | 2 | `split` |
+| `player_turn` | 3 | `double` |
+| `player_turn` | 4 | `stand` |
+
+### `card_vision.py`
+
+Responsabilidade:
+
+- detectar cartas nas ROIs;
+- ler rank e naipe;
+- retornar cartas no formato aceito por `blackjack_engine.py`.
+
+Proximo passo:
+
+- conectar captura no pulso `foto`;
+- garantir que cada pulso gere exatamente uma carta nova;
+- diferenciar em qual mao a carta deve ser inserida:
+  - mao ativa do jogador;
+  - primeira/segunda mao de split;
+  - dealer aberto;
+  - dealer hole revelada.
+
+### `single_card_vision.py`
+
+Responsabilidade:
+
+- reconhecer uma carta isolada em uma ROI calibrada.
+
+Uso futuro possivel:
+
+- ser usado no momento do pulso `foto`, caso a carta esteja sempre em uma rampa
+  ou posicao fixa antes de ser entregue pelo robo.
+
+### `chip_vision.py`
+
+Responsabilidade:
+
+- detectar fichas;
+- calcular aposta;
+- otimizar fichas.
+
+Estado atual:
+
+- a regra correta de Blackjack implementada nao depende de aposta para decidir
+  `win`, `lose` ou `push`.
+
+Proximo passo:
+
+- decidir se a aposta entrara apenas como informacao visual ou se sera integrada
+  ao resultado financeiro da rodada.
+
+Enquanto isso nao existir, `startprog` por 4 dedos substitui a deteccao da ficha
+inicial.
+
+### `game_state.py`
+
+Responsabilidade atual:
+
+- guardar estado visual simples da rodada;
+- registrar cartas vistas;
+- evitar duplicatas recentes.
+
+Proximo passo:
+
+- avaliar se `GameState` deve ser mantido como estado visual separado ou se deve
+  passar a armazenar tambem uma referencia ao `BlackjackRound`.
+
+Recomendacao:
+
+- manter `blackjack_engine.BlackjackRound` como fonte da verdade da regra;
+- usar `GameState` apenas para informacoes visuais e debug.
+
+### `robot_commands.py`
+
+Responsabilidade atual:
+
+- converter acoes textuais em comandos simples.
+
+Proximo passo:
+
+- alinhar este arquivo com os sinais reais do PolyScope;
+- decidir se ele continuara gerando dicionarios de comandos abstratos ou se sera
+  substituido por chamadas diretas a `ur_robot_bridge.py`.
+
+### `ur_robot_bridge.py`
+
+Responsabilidade:
+
+- comunicar com o controlador UR via Modbus/TCP;
+- publicar ou escrever sinais;
+- oferecer modo servidor PC e modo direto para o robo.
+
+Proximo passo:
+
+- expor uma API simples para o orquestrador:
+  - `start_program()`;
+  - `send_action("hit")`;
+  - `send_action("stand")`;
+  - `send_action("double")`;
+  - `send_action("splitAB")`;
+  - `wait_busy(False)`;
+  - `wait_foto_rising()`.
+
+Tambem precisa confirmar:
+
+- enderecos finais no PolyScope;
+- se `foto` e `busyIO` estao legiveis pelo PC;
+- se os sinais sao coils, holding registers, input registers ou discrete inputs
+  na configuracao final.
+
+### `MODBUS/ur_dealerbot_pseudocode.py`
+
+Responsabilidade:
+
+- representar o comportamento esperado do programa PolyScope.
+
+Proximo passo:
+
+- confirmar se o programa real ainda bate com esse pseudocodigo;
+- ajustar pontos divergentes, principalmente:
+  - quando `foto` pulsa;
+  - quando `busyIO` sobe/desce;
+  - como splits sao consumidos;
+  - como `stand` encerra jogador e dealer.
+
+### `MODBUS/modbus_vision_skeleton.py`
+
+Responsabilidade:
+
+- esqueleto antigo/conceitual.
+
+Proximo passo:
+
+- usar apenas como referencia historica;
+- preferir integrar o fluxo real via `ur_robot_bridge.py`.
+
+## 19. Orquestrador final sugerido
+
+Criar um fluxo em `main.py` ou em um arquivo orquestrador futuro que siga esta
+estrutura:
+
+```text
+estado = waiting_start
+
+loop:
+    se estado == waiting_start:
+        ler sinal de mao
+        se 4 dedos estavel:
+            enviar startprog
+            estado = initial_deal
+
+    se estado == initial_deal:
+        aguardar pulsos foto
+        reconhecer cartas iniciais
+        criar BlackjackRound
+        estado = player_turn
+
+    se estado == player_turn:
+        obter mao ativa do motor
+        ler sinal de mao
+        converter dedos em acao
+        validar acao no motor
+        se acao legal:
+            enviar comando ao robo
+            aguardar busyIO/foto conforme necessario
+            reconhecer cartas novas se houver
+            atualizar motor
+        se todas maos encerradas:
+            estado = dealer_turn
+
+    se estado == dealer_turn:
+        revelar carta fechada
+        reconhecer carta
+        enquanto dealer < 17:
+            enviar hit ao robo
+            aguardar foto
+            reconhecer carta
+            atualizar motor
+        resolver rodada
+        estado = finished
+
+    se estado == finished:
+        imprimir resultado
+        aguardar novo start
+```
+
+## 20. Plano de implementacao recomendado
+
+### Etapa 1: Start por 4 dedos
+
+Implementar primeiro:
+
+- estado `waiting_start`;
+- reconhecimento estavel de 4 dedos;
+- envio de `startprog`;
+- confirmacao por `busyIO`.
+
+Essa etapa valida a substituicao da ficha inicial pelo gesto de mao.
+
+### Etapa 2: Captura por `foto`
+
+Conectar:
+
+- `wait_foto_rising()`;
+- captura de frame;
+- `card_vision.py` ou `single_card_vision.py`;
+- adicao da carta no motor.
+
+### Etapa 3: Acoes do jogador validadas pelo motor
+
+Antes de enviar qualquer sinal ao robo:
+
+1. ler gesto;
+2. converter para acao;
+3. consultar `legal_player_actions`;
+4. se ilegal, ignorar e pedir nova acao;
+5. se legal, enviar ao robo e aplicar no motor.
+
+### Etapa 4: Split fisico
+
+Mapear `split` logico para:
+
+- `splitAB`;
+- `splitAC`;
+- `splitBC`.
+
+Esse mapeamento precisa considerar:
+
+- mao ativa;
+- numero de splits ja feitos;
+- posicao fisica das cartas na mesa;
+- fluxo real do PolyScope.
+
+### Etapa 5: Dealer automatico
+
+Depois que todas as maos do jogador encerram:
+
+- revelar hole card;
+- reconhecer carta;
+- usar `dealer_action`;
+- enviar `hit` enquanto dealer < 17;
+- parar automaticamente em 17 ou mais;
+- resolver rodada.
+
+### Etapa 6: Resultado e reset
+
+Ao finalizar:
+
+- imprimir resultado por mao;
+- salvar log da rodada;
+- limpar sinais Modbus;
+- voltar para `waiting_start`;
+- esperar novo gesto de 4 dedos.
+
+## 21. Criterios para considerar integrado
+
+O projeto pode ser considerado integrado quando:
+
+1. `pytest -q` continua passando.
+2. `blackjack_manual_simulator.py` reproduz os cenarios de regra.
+3. `main.py --simulate-round` funciona com imagens salvas.
+4. O robo responde a `startprog` por gesto de 4 dedos antes da rodada.
+5. O PC le `busyIO` e `foto` de forma confiavel.
+6. Cada pulso `foto` gera uma carta reconhecida e inserida na mao correta.
+7. Acoes ilegais sao rejeitadas sem acionar o robo.
+8. `split`, `double`, `hit` e `stand` movimentam o robo e atualizam o motor.
+9. Dealer joga automaticamente ate 17.
+10. Resultado final bate com as regras do documento.
