@@ -115,7 +115,7 @@ def test_one_round_simulation_uses_card_and_hand_image_recognition():
 
     summary = simulate_round_from_files(
         IMAGE_DIR / "table_round_01_player_QS_5S_dealer_2H_3S.jpeg",
-        [Path("Sinais") / "4Dedo1.jpg"],
+        [Path("Sinais") / "5Dedo1.jpg"],
         dealer_hole="3S",
         player_draws=[],
         dealer_draws=["KH", "6C"],
@@ -126,7 +126,7 @@ def test_one_round_simulation_uses_card_and_hand_image_recognition():
 
     assert {"Q", "5"}.issubset(player_ranks)
     assert "2" in dealer_ranks
-    assert summary["vision"]["hand_decisions"][0]["fingers"] == 4
+    assert summary["vision"]["hand_decisions"][0]["fingers"] == 5
     assert summary["vision"]["player_actions"] == ["stand"]
     assert summary["dealer_total"] == 21
     assert summary["player_hands"][0]["result"] == RESULT_LOSE
@@ -139,8 +139,8 @@ def test_manual_card_arguments_can_drive_split_round_with_hand_images():
         round_image=None,
         hand_images=[
             Path("Sinais") / "2Dedo1.jpg",
-            Path("Sinais") / "4Dedo1.jpg",
-            Path("Sinais") / "4Dedo2.jpg",
+            Path("Sinais") / "5Dedo1.jpg",
+            Path("Sinais") / "5Dedo2.jpg",
         ],
         dealer_hole="10H",
         player_draws=["3H", "2C"],

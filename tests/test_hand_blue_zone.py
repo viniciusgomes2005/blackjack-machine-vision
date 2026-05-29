@@ -103,3 +103,79 @@ def test_finger_detector_counts_raised_fingertips_from_palm_shape():
 
     assert hand_sign_vision._detect_fingers(one_finger).count == 1
     assert hand_sign_vision._detect_fingers(two_fingers).count == 2
+
+
+def _synthetic_landmarks(raised):
+    points = [(0.50, 0.90)] * 21
+    points[1] = (0.42, 0.78)
+    points[2] = (0.36, 0.72)
+    points[3] = (0.32, 0.68)
+    points[4] = (0.18, 0.62) if "thumb" in raised else (0.38, 0.70)
+
+    specs = {
+        "index": (5, 6, 7, 8, 0.42),
+        "middle": (9, 10, 11, 12, 0.50),
+        "ring": (13, 14, 15, 16, 0.58),
+        "pinky": (17, 18, 19, 20, 0.66),
+    }
+    for name, (mcp_i, pip_i, dip_i, tip_i, x) in specs.items():
+        points[mcp_i] = (x, 0.64)
+        if name in raised:
+            points[pip_i] = (x, 0.48)
+            points[dip_i] = (x, 0.36)
+            points[tip_i] = (x, 0.24)
+        else:
+            points[pip_i] = (x, 0.55)
+            points[dip_i] = (x, 0.62)
+            points[tip_i] = (x, 0.68)
+    return points
+
+
+def test_skeleton_landmarks_count_raised_fingers():
+    count, raised = hand_sign_vision.count_fingers_from_landmarks(
+        _synthetic_landmarks({"index", "middle", "ring", "pinky"})
+    )
+    assert count == 4
+    assert set(raised) == {"index", "middle", "ring", "pinky"}
+
+    count, raised = hand_sign_vision.count_fingers_from_landmarks(
+        _synthetic_landmarks({"thumb", "index", "middle", "ring", "pinky"})
+    )
+    assert count == 5
+    assert set(raised) == {"thumb", "index", "middle", "ring", "pinky"}
+
+
+def test_analyze_hand_image_prefers_skeleton_when_available(monkeypatch):
+    frame = _frame_with_irregular_red_zone()
+
+    monkeypatch.setattr(hand_sign_vision, "USE_HAND_SKELETON_DETECTOR", True)
+    monkeypatch.setattr(hand_sign_vision, "_dataset_classifier", lambda: None)
+    monkeypatch.setattr(hand_sign_vision, "read_finger_count", lambda *args, **kwargs: 2)
+    monkeypatch.setattr(
+        hand_sign_vision,
+        "_detect_hand_skeleton",
+        lambda image, hand_zone: hand_sign_vision.SkeletonDetection(
+            count=5,
+            landmarks=tuple((10, 10) for _ in range(21)),
+            raised_fingers=("thumb", "index", "middle", "ring", "pinky"),
+        ),
+    )
+
+    assert hand_sign_vision.analyze_hand_image(frame) == 5
+
+
+def test_skeleton_is_rejected_when_zone_has_no_skin(monkeypatch):
+    frame = _frame_with_irregular_red_zone()
+    hand_zone = hand_sign_vision.infer_blue_hand_zone(frame)
+
+    called = False
+
+    def fake_hands():
+        nonlocal called
+        called = True
+        return object()
+
+    monkeypatch.setattr(hand_sign_vision, "_mediapipe_hands", fake_hands)
+
+    assert hand_sign_vision._detect_hand_skeleton(frame, hand_zone) is None
+    assert called is True

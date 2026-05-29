@@ -55,7 +55,7 @@ CHIP_VALUES = {
 # Faixas HSV. OpenCV usa H de 0 a 179.
 HSV_RANGES = {
     "red_tape": [((0, 90, 70), (10, 255, 255)), ((170, 90, 70), (179, 255, 255))],
-    "blue_tape": [((90, 70, 60), (130, 255, 255))],
+    "blue_tape": [((90, 60, 25), (135, 255, 255))],
     "yellow_tape": [((18, 80, 80), (35, 255, 255))],
     "yellow_chip": [((18, 80, 80), (35, 255, 255))],
     "green_chip": [((40, 60, 60), (85, 255, 255))],
@@ -88,7 +88,11 @@ HAND_SIGN_MIN_STABLE_FRAMES = 4
 HAND_ZONE_COLOR = "red_tape"
 HAND_ZONE_MIN_AREA = 700
 HAND_ZONE_DILATE_PX = 28
-USE_HAND_DATASET_CLASSIFIER = False
+USE_HAND_SKELETON_DETECTOR = True
+USE_HAND_DATASET_CLASSIFIER = True
+HAND_DATASET_CONFIDENCE_DISTANCE = 45.0
+HAND_SKELETON_MIN_SKIN_AREA = 1800
+HAND_SKELETON_MIN_LANDMARKS_IN_ZONE = 9
 
 # Aliases antigos mantidos para compatibilidade com codigo/testes existentes.
 BLUE_HAND_ZONE_MIN_AREA = HAND_ZONE_MIN_AREA

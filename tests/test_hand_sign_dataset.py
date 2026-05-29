@@ -13,10 +13,13 @@ SIGNALS_DIR = Path(__file__).resolve().parents[1] / "Sinais"
 
 def _expected_count(path):
     name = path.name.lower()
-    if name.startswith("t"):
-        return None
+    stem = path.stem.lower()
     if "vazio" in name:
         return 0
+
+    match = re.search(r"foto\d+_([1-5])$", stem)
+    if match is not None:
+        return int(match.group(1))
 
     match = re.search(r"([1-5])dedo", name)
     if match is None:
@@ -26,6 +29,9 @@ def _expected_count(path):
 
 
 def test_sinais_dataset_reaches_full_accuracy():
+    assert hand_sign_vision.USE_HAND_SKELETON_DETECTOR is True
+    assert hand_sign_vision.USE_HAND_DATASET_CLASSIFIER is True
+
     image_paths = sorted(SIGNALS_DIR.glob("*.jpg"))
     assert image_paths, "Dataset Sinais/*.jpg nao encontrado."
 

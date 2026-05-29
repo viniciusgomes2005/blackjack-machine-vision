@@ -320,17 +320,21 @@ class RobotDirectClient:
         ur_host: str = DEFAULT_UR_HOST,
         ur_port: int = DEFAULT_UR_PORT,
         address_mode: str = "standard",
+        write_target: str = "holding",
+        unit_id: int = 1,
         timeout: float = 1.0,
     ) -> None:
         ModbusClient, _ = _load_modbus()
         self.ur_host = ur_host
         self.ur_port = ur_port
         self.address_mode = address_mode
+        self.write_target = write_target
         self._client = ModbusClient(
             host=ur_host,
             port=ur_port,
+            unit_id=unit_id,
             auto_open=True,
-            auto_close=False,
+            auto_close=True,
             timeout=timeout,
         )
 
@@ -347,13 +351,19 @@ class RobotDirectClient:
         results = []
 
         for label, address in addresses:
-            holding_ok = self._client.write_single_register(address, int_value)
-            coil_ok = self._client.write_single_coil(address, bool_value)
+            holding_ok = False
+            coil_ok = False
+            if self.write_target in {"holding", "both"}:
+                holding_ok = self._client.write_single_register(address, int_value)
+            if self.write_target in {"coil", "both"}:
+                coil_ok = self._client.write_single_coil(address, bool_value)
             results.append((label, address, holding_ok, coil_ok))
+            error = self._client_status()
 
             print(
                 f"[ur-direct] {name}={'HI' if value else 'LO'} "
-                f"{label}_addr={address} holding_ok={holding_ok} coil_ok={coil_ok}"
+                f"{label}_addr={address} holding_ok={holding_ok} coil_ok={coil_ok} "
+                f"{error}"
             )
 
         if not any(holding_ok or coil_ok for _, _, holding_ok, coil_ok in results):
@@ -371,6 +381,13 @@ class RobotDirectClient:
             ("standard", DEFAULT_SIGNAL_ADDRESSES[name]),
             ("legacy", LEGACY_SIGNAL_ADDRESSES[name]),
         ]
+
+    def _client_status(self) -> str:
+        error = self._client.last_error_as_txt
+        exception = self._client.last_except_as_full_txt
+        if error == "no error" and exception == "no exception":
+            return "status=ok"
+        return f"last_error={error!r} last_except={exception!r}"
 
     def start_program(self, hold: float = 0.5) -> None:
         self.set_signal("startprog", True)
@@ -394,9 +411,29 @@ class RobotDirectClient:
                 f"holding={holding} coil={coil}"
             )
 
+    def write_address(self, address: int, value: int) -> None:
+        holding_ok = self._client.write_single_register(address, int(value))
+        status = self._client_status()
+        readback = self._client.read_holding_registers(address, 1)
+        print(
+            f"[ur-direct] holding_addr={address} value={value} "
+            f"write_ok={holding_ok} readback={readback} {status}"
+        )
 
-def _interactive_loop(bridge: DealerBotBridge) -> None:
-    print("Comandos: start, hit, double, stand, splitAB, splitBC, splitAC, status, clear, quit")
+    def read_address(self, address: int) -> None:
+        holding = self._client.read_holding_registers(address, 1)
+        coil = self._client.read_coils(address, 1)
+        status = self._client_status()
+        print(
+            f"[ur-direct] addr={address} holding={holding} coil={coil} {status}"
+        )
+
+
+def _interactive_loop(bridge: DealerBotBridge, hold: float) -> None:
+    print(
+        "Comandos: start, hit, double, stand, splitAB, splitBC, splitAC, "
+        "hold <sinal>, set <sinal> <true|false>, status, clear, quit"
+    )
     while True:
         command = input("ur> ").strip()
         if not command:
@@ -411,10 +448,30 @@ def _interactive_loop(bridge: DealerBotBridge) -> None:
             print("[ur] todos os sinais em LO")
             continue
         if command == "start":
-            bridge.start_program()
+            bridge.start_program(hold=hold)
             continue
         if command in ACTION_SIGNALS:
-            bridge.send_action(command)
+            bridge.send_action(command, hold=hold)
+            continue
+        if command.startswith("hold "):
+            parts = command.split()
+            if len(parts) != 2:
+                print("Uso: hold <sinal>")
+                continue
+            try:
+                bridge.set_signal(parts[1], True)
+            except ValueError as exc:
+                print(f"Erro: {exc}")
+            continue
+        if command.startswith("set "):
+            parts = command.split()
+            if len(parts) != 3:
+                print("Uso: set <sinal> <true|false>")
+                continue
+            try:
+                bridge.set_signal(parts[1], parse_bool(parts[2]))
+            except ValueError as exc:
+                print(f"Erro: {exc}")
             continue
         print(f"Comando desconhecido: {command}")
 
@@ -434,11 +491,37 @@ def _direct_interactive_loop(client: RobotDirectClient, hold: float) -> None:
             for name in DEFAULT_SIGNAL_ADDRESSES:
                 client.read_signal(name)
             continue
+        if command.startswith("read "):
+            parts = command.split()
+            if len(parts) != 2:
+                print("Uso: read <endereco>")
+                continue
+            try:
+                client.read_address(int(parts[1]))
+            except ValueError as exc:
+                print(f"Erro: {exc}")
+            continue
+        if command.startswith("write "):
+            parts = command.split()
+            if len(parts) != 3:
+                print("Uso: write <endereco> <valor>")
+                continue
+            try:
+                client.write_address(int(parts[1]), int(parts[2]))
+            except ValueError as exc:
+                print(f"Erro: {exc}")
+            continue
         if command == "start":
-            client.start_program(hold=hold)
+            try:
+                client.start_program(hold=hold)
+            except RuntimeError as exc:
+                print(f"Erro: {exc}")
             continue
         if command in ACTION_SIGNALS:
-            client.pulse_signal(command, hold=hold)
+            try:
+                client.pulse_signal(command, hold=hold)
+            except RuntimeError as exc:
+                print(f"Erro: {exc}")
             continue
         if command.startswith("hold "):
             parts = command.split()
@@ -447,7 +530,7 @@ def _direct_interactive_loop(client: RobotDirectClient, hold: float) -> None:
                 continue
             try:
                 client.set_signal(parts[1], True)
-            except ValueError as exc:
+            except (RuntimeError, ValueError) as exc:
                 print(f"Erro: {exc}")
             continue
         if command.startswith("set "):
@@ -457,7 +540,7 @@ def _direct_interactive_loop(client: RobotDirectClient, hold: float) -> None:
                 continue
             try:
                 client.set_signal(parts[1], parse_bool(parts[2]))
-            except ValueError as exc:
+            except (RuntimeError, ValueError) as exc:
                 print(f"Erro: {exc}")
             continue
         print(f"Comando desconhecido: {command}")
@@ -469,6 +552,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pc-port", type=int, default=DEFAULT_PC_PORT, help="Porta Modbus do PC.")
     parser.add_argument("--ur-host", default=DEFAULT_UR_HOST, help="IP do controlador UR.")
     parser.add_argument("--ur-port", type=int, default=DEFAULT_UR_PORT, help="Porta Modbus do UR.")
+    parser.add_argument("--unit-id", type=int, default=1, help="Unit ID Modbus TCP usado no modo direto.")
     parser.add_argument("--foto-coil", type=int, default=DEFAULT_FOTO_COIL, help="Coil DO1/foto no UR.")
     parser.add_argument("--busyio-coil", type=int, default=DEFAULT_BUSYIO_COIL, help="Coil DO2/busyIO no UR.")
     parser.add_argument("--no-ur-read", action="store_true", help="Nao tenta ler foto/busyIO do UR.")
@@ -514,6 +598,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="standard",
         help="No modo direto, escreve em 128..134, 0..6 ou ambos. Padrao: standard.",
     )
+    parser.add_argument(
+        "--write-target",
+        choices=["holding", "coil", "both"],
+        default="holding",
+        help="No modo direto, escreve em holding register, coil ou ambos. Padrao: holding.",
+    )
     return parser
 
 
@@ -526,6 +616,8 @@ def main() -> None:
             ur_host=args.ur_host,
             ur_port=args.ur_port,
             address_mode=args.address_mode,
+            write_target=args.write_target,
+            unit_id=args.unit_id,
         )
         try:
             for raw_set in args.set:
@@ -584,7 +676,7 @@ def main() -> None:
         if args.command:
             bridge.send_action(args.command, hold=args.hold, accept_timeout=args.accept_timeout)
         if not args.no_interactive:
-            _interactive_loop(bridge)
+            _interactive_loop(bridge, hold=args.hold)
     except KeyboardInterrupt:
         pass
     except RuntimeError as exc:

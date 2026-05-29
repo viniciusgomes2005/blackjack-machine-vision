@@ -38,6 +38,13 @@ Para testar o reconhecedor de sinais de mao no quadrado vermelho:
 python hand_sign_vision.py --camera 0
 ```
 
+O reconhecedor usado por padrao no robo e um pipeline hibrido com
+skeleton/landmarks do MediaPipe ligado. Quando o skeleton detecta uma mao valida
+fora dos exemplos conhecidos, ele melhora a generalizacao entre pessoas. Quando
+o MediaPipe nao detecta a mao alvo ou a imagem esta muito proxima da base
+rotulada em `Sinais/`, o classificador calibrado pela base vence para preservar
+os casos ja validados.
+
 A janela da camera abre em tela cheia. `Espaco` captura, salva a foto em
 `Sinais/` e o terminal imprime `1`, `2`, `3`, `4`, `5` ou `vazio`. Voce pode
 apertar `Espaco` varias vezes; `Esc` sai.
@@ -152,8 +159,9 @@ terminal a decisao detectada:
 | 1 | hit |
 | 2 | split |
 | 3 | double |
-| 4 | stand |
-| 5 ou vazio | sem acao |
+| 4 antes da rodada | startprog |
+| 5 durante a rodada | stand |
+| vazio | sem acao |
 
 Para ver as janelas de debug da area vermelha e da mascara de pele:
 
@@ -170,6 +178,49 @@ python DealerBotMain.py --camera 0 --hand-interval 5 --send-robot
 
 Nesse modo, `split` e enviado como `splitAB` ate a logica do jogo decidir entre
 `splitAB`, `splitBC` e `splitAC`.
+
+## Testar gestos no orquestrador de rodada
+
+Para validar primeiro o gesto de 4 dedos sem enviar nada ao robo:
+
+```bash
+python robot_round_orchestrator.py --camera 0 --show --dry-run-robot --hand-interval 1 --stable-samples 2
+```
+
+Resultado esperado no terminal, apos manter 4 dedos no quadrado vermelho por
+duas leituras:
+
+```text
+[hand] estado=waiting_start dedos=4 acao=startprog
+[robot] pulso startprog hold=0.50s
+[round] startprog enviado; capture as cartas iniciais com tecla c
+```
+
+Nesse modo o pulso e apenas impresso. Quando quiser acionar o UR, remova
+`--dry-run-robot`.
+
+Para testar fisicamente os gestos no robo sem depender da rodada ou das cartas,
+use `--gesture-test`. Nesse modo 1 dedo pulsa `hit`, 2 dedos pulsa `splitAB`, 3
+dedos pulsa `double`, 4 dedos pulsa `startprog` e 5 dedos pulsa `stand`:
+
+```bash
+python robot_round_orchestrator.py --camera 0 --show --gesture-test --hand-interval 1 --stable-samples 2
+```
+
+No modo normal de rodada, depois do `startprog`, capture as cartas iniciais com
+`c` na ordem: primeira carta do jogador, carta aberta do dealer, segunda carta
+do jogador. So depois disso o estado vira `player_turn` e gestos como `hit`
+sao enviados ao robo.
+
+Depois de `hit`, `double` ou `split`, o orquestrador envia o pulso ao robo e
+fica aguardando a proxima carta. Quando a carta estiver na rampa, pressione
+`c`. O loop principal continua vivo e a janela de debug da mao continua
+atualizando.
+
+Com `--show`, o orquestrador tambem abre as janelas `Robot Round Orchestrator -
+mao` e `Robot Round Orchestrator - mascara mao`. Use essas janelas para validar
+se o quadrado vermelho esta sendo encontrado e se a mascara de pele corresponde
+de fato aos dedos.
 
 ## Comunicacao com o Universal Robots
 
@@ -607,15 +658,15 @@ A convencao atual de sinais de mao e:
 | 1 | `hit` |
 | 2 | `split` |
 | 3 | `double` |
-| 4 | `stand` |
-| 5 ou vazio | sem acao |
+| 4 antes da rodada | `startprog` |
+| 5 durante a rodada | `stand` |
+| vazio | sem acao |
 
-Na integracao futura, antes da rodada comecar, o sinal de 4 dedos tambem devera
-ter uma funcao contextual: substituir o ato de jogar ficha na mesa e disparar
-`startprog`. Ou seja:
+Antes da rodada comecar, o sinal de 4 dedos substitui o ato de jogar ficha na
+mesa e dispara `startprog`. Ou seja:
 
 - antes da rodada: 4 dedos = iniciar programa/rodada;
-- durante a vez do jogador: 4 dedos = `stand`.
+- durante a vez do jogador: 5 dedos = `stand`.
 
 Essa distincao deve ser feita pelo estado do jogo.
 
