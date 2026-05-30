@@ -24,12 +24,13 @@ LEGACY_SIGNAL_ADDRESSES = {
 }
 
 ACTION_SIGNALS = {"hit", "splitAB", "double", "stand", "splitBC", "splitAC"}
+MODBUS_OUTPUT_SOURCES = ("coils", "discrete_inputs", "holding_registers", "input_registers")
 
 DEFAULT_PC_HOST = "10.102.28.161"
 DEFAULT_PC_PORT = 31415
 DEFAULT_UR_HOST = "10.103.18.245"
 DEFAULT_UR_PORT = 502
-DEFAULT_FOTO_COIL = 1
+DEFAULT_FOTO_COIL = 17
 DEFAULT_BUSYIO_COIL = 2
 
 
@@ -125,6 +126,23 @@ class RobotInputs:
 class RobotOutputs:
     foto: bool = False
     busyIO: bool = False
+    source: str = "unknown"
+
+
+def _active_modbus_addresses(values: list | dict[int, int | bool] | None, start: int) -> list[str]:
+    if values is None:
+        return ["unavailable"]
+    if isinstance(values, dict):
+        return [f"{address}={int(bool(value))}" for address, value in values.items() if value]
+    return [f"{start + offset}={int(bool(value))}" for offset, value in enumerate(values) if value]
+
+
+def _format_modbus_snapshot(snapshot: dict[str, list | dict[int, int | bool] | None], start: int) -> str:
+    parts = []
+    for source in MODBUS_OUTPUT_SOURCES:
+        active = _active_modbus_addresses(snapshot.get(source), start)
+        parts.append(f"{source}[{', '.join(active) if active else 'all LO'}]")
+    return " ".join(parts)
 
 
 class DealerBotBridge:
@@ -428,6 +446,273 @@ class RobotDirectClient:
             f"[ur-direct] addr={address} holding={holding} coil={coil} {status}"
         )
 
+    def read_outputs(
+        self,
+        foto_coil: int = DEFAULT_FOTO_COIL,
+        busyio_coil: int = DEFAULT_BUSYIO_COIL,
+        source: str = "auto",
+    ) -> RobotOutputs:
+        if source != "auto":
+            return self._read_outputs_from_source(source, foto_coil, busyio_coil)
+
+        readings = [
+            self._read_outputs_from_source(source_name, foto_coil, busyio_coil)
+            for source_name in MODBUS_OUTPUT_SOURCES
+        ]
+        active = [reading for reading in readings if reading.foto or reading.busyIO]
+        if active:
+            return RobotOutputs(
+                foto=any(reading.foto for reading in active),
+                busyIO=any(reading.busyIO for reading in active),
+                source="+".join(reading.source for reading in active),
+            )
+        if readings:
+            return RobotOutputs(source="auto:none")
+        return RobotOutputs()
+
+    def _read_outputs_from_source(
+        self,
+        source: str,
+        foto_coil: int,
+        busyio_coil: int,
+    ) -> RobotOutputs:
+        start = min(foto_coil, busyio_coil)
+        count = max(foto_coil, busyio_coil) - start + 1
+
+        if source == "coils":
+            values = self._client.read_coils(start, count)
+        elif source == "discrete_inputs":
+            values = self._client.read_discrete_inputs(start, count)
+        elif source == "holding_registers":
+            values = self._client.read_holding_registers(start, count)
+        elif source == "input_registers":
+            values = self._client.read_input_registers(start, count)
+        else:
+            raise ValueError(f"fonte de output desconhecida: {source}")
+
+        if values is None:
+            foto_value = self._read_one_from_source(source, foto_coil)
+            busyio_value = self._read_one_from_source(source, busyio_coil)
+            return RobotOutputs(
+                foto=bool(foto_value) if foto_value is not None else False,
+                busyIO=bool(busyio_value) if busyio_value is not None else False,
+                source=f"{source}:single" if foto_value is not None or busyio_value is not None else f"{source}:none",
+            )
+
+        return RobotOutputs(
+            foto=bool(values[foto_coil - start]),
+            busyIO=bool(values[busyio_coil - start]),
+            source=source,
+        )
+
+    def _read_one_from_source(self, source: str, address: int):
+        if source == "coils":
+            values = self._client.read_coils(address, 1)
+        elif source == "discrete_inputs":
+            values = self._client.read_discrete_inputs(address, 1)
+        elif source == "holding_registers":
+            values = self._client.read_holding_registers(address, 1)
+        elif source == "input_registers":
+            values = self._client.read_input_registers(address, 1)
+        else:
+            raise ValueError(f"fonte de output desconhecida: {source}")
+        if values is None:
+            return None
+        return values[0]
+
+    def read_table_snapshot(self, start: int = 0, count: int = 33) -> dict[str, dict[int, int | bool] | None]:
+        snapshot = {}
+        for source in MODBUS_OUTPUT_SOURCES:
+            values_by_address = {}
+            any_available = False
+            for address in range(start, start + count):
+                if source == "coils":
+                    values = self._client.read_coils(address, 1)
+                elif source == "discrete_inputs":
+                    values = self._client.read_discrete_inputs(address, 1)
+                elif source == "holding_registers":
+                    values = self._client.read_holding_registers(address, 1)
+                elif source == "input_registers":
+                    values = self._client.read_input_registers(address, 1)
+                else:
+                    values = None
+                if values is None:
+                    continue
+                any_available = True
+                values_by_address[address] = values[0]
+            snapshot[source] = values_by_address if any_available else None
+        return snapshot
+
+
+class PcModbusOutputServer:
+    """
+    Servidor Modbus local para sinais que o UR escreve como Modbus client.
+
+    Use quando o PolyScope configurou `foto`/`busyIO` em Installation ->
+    Modbus Client I/O Setup apontando para o IP do PC.
+    """
+
+    def __init__(
+        self,
+        pc_host: str = "0.0.0.0",
+        pc_port: int = DEFAULT_PC_PORT,
+    ) -> None:
+        _, ModbusServer = _load_modbus()
+        self.pc_host = pc_host
+        self.pc_port = pc_port
+        self._server = ModbusServer(pc_host, pc_port, no_block=True)
+        self._started = False
+
+    def start(self) -> None:
+        if self._started:
+            return
+        _assert_port_available(self.pc_host, self.pc_port)
+        self._server.start()
+        self._started = True
+        print(f"[pc-modbus] servidor local ouvindo em {self.pc_host}:{self.pc_port}")
+
+    def close(self) -> None:
+        if self._started:
+            self._server.stop()
+            self._started = False
+
+    def read_outputs(
+        self,
+        foto_coil: int = DEFAULT_FOTO_COIL,
+        busyio_coil: int = DEFAULT_BUSYIO_COIL,
+        source: str = "auto",
+    ) -> RobotOutputs:
+        if source != "auto":
+            return self._read_outputs_from_source(source, foto_coil, busyio_coil)
+
+        readings = [
+            self._read_outputs_from_source(source_name, foto_coil, busyio_coil)
+            for source_name in MODBUS_OUTPUT_SOURCES
+        ]
+        active = [reading for reading in readings if reading.foto or reading.busyIO]
+        if active:
+            return RobotOutputs(
+                foto=any(reading.foto for reading in active),
+                busyIO=any(reading.busyIO for reading in active),
+                source="+".join(reading.source for reading in active),
+            )
+        return RobotOutputs(source="pc_server:auto:none")
+
+    def _read_outputs_from_source(
+        self,
+        source: str,
+        foto_coil: int,
+        busyio_coil: int,
+    ) -> RobotOutputs:
+        start = min(foto_coil, busyio_coil)
+        count = max(foto_coil, busyio_coil) - start + 1
+
+        try:
+            if source == "coils":
+                values = self._server.data_bank.get_coils(start, count)
+            elif source == "discrete_inputs":
+                values = self._server.data_bank.get_discrete_inputs(start, count)
+            elif source == "holding_registers":
+                values = self._server.data_bank.get_holding_registers(start, count)
+            elif source == "input_registers":
+                values = self._server.data_bank.get_input_registers(start, count)
+            else:
+                raise ValueError(f"fonte de output desconhecida: {source}")
+        except AttributeError:
+            return RobotOutputs(source=f"pc_server:{source}:unsupported")
+
+        if values is None:
+            return RobotOutputs(source=f"pc_server:{source}:none")
+
+        return RobotOutputs(
+            foto=bool(values[foto_coil - start]),
+            busyIO=bool(values[busyio_coil - start]),
+            source=f"pc_server:{source}",
+        )
+
+    def read_table_snapshot(self, start: int = 0, count: int = 33) -> dict[str, list | None]:
+        snapshot = {}
+        for source in MODBUS_OUTPUT_SOURCES:
+            try:
+                if source == "coils":
+                    values = self._server.data_bank.get_coils(start, count)
+                elif source == "discrete_inputs":
+                    values = self._server.data_bank.get_discrete_inputs(start, count)
+                elif source == "holding_registers":
+                    values = self._server.data_bank.get_holding_registers(start, count)
+                elif source == "input_registers":
+                    values = self._server.data_bank.get_input_registers(start, count)
+                else:
+                    values = None
+            except AttributeError:
+                values = None
+            snapshot[source] = values
+        return snapshot
+
+
+def diagnose_pc_outputs(
+    pc_host: str,
+    pc_port: int,
+    scan_start: int = 0,
+    scan_count: int = 33,
+    poll: float = 0.05,
+    print_idle: float = 2.0,
+) -> None:
+    server = PcModbusOutputServer(pc_host=pc_host, pc_port=pc_port)
+    server.start()
+    print(
+        "[pc-modbus] diagnostico ativo; pulse foto/busyIO no PolyScope. "
+        f"varrendo {scan_start}..{scan_start + scan_count - 1} em todas as tabelas."
+    )
+    previous = None
+    last_print = 0.0
+    try:
+        while True:
+            now = time.monotonic()
+            snapshot = server.read_table_snapshot(start=scan_start, count=scan_count)
+            changed = snapshot != previous
+            idle_due = print_idle > 0 and now - last_print >= print_idle
+            if changed or idle_due:
+                reason = "mudanca" if changed else "sem mudanca"
+                print(f"[pc-modbus] {reason}: {_format_modbus_snapshot(snapshot, scan_start)}")
+                previous = snapshot
+                last_print = now
+            time.sleep(poll)
+    finally:
+        server.close()
+
+
+def diagnose_ur_outputs(
+    ur_host: str,
+    ur_port: int,
+    unit_id: int = 1,
+    scan_start: int = 0,
+    scan_count: int = 33,
+    poll: float = 0.05,
+    print_idle: float = 2.0,
+) -> None:
+    client = RobotDirectClient(ur_host=ur_host, ur_port=ur_port, unit_id=unit_id)
+    print(
+        "[ur-direct] diagnostico read-only ativo; pulse foto/busyIO no PolyScope. "
+        f"varrendo {scan_start}..{scan_start + scan_count - 1} em todas as tabelas do UR."
+    )
+    previous = None
+    last_print = 0.0
+    try:
+        while True:
+            now = time.monotonic()
+            snapshot = client.read_table_snapshot(start=scan_start, count=scan_count)
+            changed = snapshot != previous
+            idle_due = print_idle > 0 and now - last_print >= print_idle
+            if changed or idle_due:
+                reason = "mudanca" if changed else "sem mudanca"
+                print(f"[ur-direct] {reason}: {_format_modbus_snapshot(snapshot, scan_start)}")
+                previous = snapshot
+                last_print = now
+            time.sleep(poll)
+    finally:
+        client.close()
+
 
 def _interactive_loop(bridge: DealerBotBridge, hold: float) -> None:
     print(
@@ -583,6 +868,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="Mantem startprog em HI ate Ctrl+C para diagnosticar a tela Modbus do UR.",
     )
     parser.add_argument(
+        "--diagnose-pc-outputs",
+        action="store_true",
+        help="Sobe servidor Modbus local e mostra mudancas em coils/registers escritos pelo UR.",
+    )
+    parser.add_argument(
+        "--diagnose-ur-outputs",
+        action="store_true",
+        help="Le o servidor Modbus do UR e mostra mudancas em coils/registers, sem escrever nada.",
+    )
+    parser.add_argument("--scan-start", type=int, default=0, help="Endereco inicial da varredura Modbus.")
+    parser.add_argument("--scan-count", type=int, default=33, help="Quantidade de enderecos varridos.")
+    parser.add_argument("--scan-poll", type=float, default=0.05, help="Intervalo da varredura em segundos.")
+    parser.add_argument(
+        "--scan-print-idle",
+        type=float,
+        default=2.0,
+        help="Reimprime snapshot sem mudanca a cada N segundos. 0 desliga.",
+    )
+    parser.add_argument(
         "--direct-to-robot",
         action="store_true",
         help="Conecta no IP do robo e escreve diretamente em coils/holding registers.",
@@ -609,6 +913,37 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
+    if args.diagnose_pc_outputs:
+        try:
+            diagnose_pc_outputs(
+                pc_host=args.pc_host,
+                pc_port=args.pc_port,
+                scan_start=args.scan_start,
+                scan_count=args.scan_count,
+                poll=args.scan_poll,
+                print_idle=args.scan_print_idle,
+            )
+        except KeyboardInterrupt:
+            pass
+        except RuntimeError as exc:
+            print(f"[pc-modbus] erro: {exc}")
+        return
+
+    if args.diagnose_ur_outputs:
+        try:
+            diagnose_ur_outputs(
+                ur_host=args.ur_host,
+                ur_port=args.ur_port,
+                unit_id=args.unit_id,
+                scan_start=args.scan_start,
+                scan_count=args.scan_count,
+                poll=args.scan_poll,
+                print_idle=args.scan_print_idle,
+            )
+        except KeyboardInterrupt:
+            pass
+        return
+
     if _should_use_direct_mode(args):
         if args.no_ur_read:
             print("[ur-direct] --no-ur-read recebido; no modo direto ele apenas evita o servidor do PC.")
