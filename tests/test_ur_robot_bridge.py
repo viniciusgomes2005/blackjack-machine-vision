@@ -74,7 +74,7 @@ def test_direct_client_read_outputs_falls_back_to_single_address_reads():
     client = RobotDirectClient.__new__(RobotDirectClient)
     client._client = FakeClient()
 
-    outputs = client.read_outputs(foto_coil=17, busyio_coil=2, source="coils")
+    outputs = client.read_outputs(foto_coil=17, busyio_coil=18, source="coils")
 
     assert outputs.foto is True
     assert outputs.busyIO is False

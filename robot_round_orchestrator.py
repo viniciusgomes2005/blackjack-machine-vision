@@ -1,18 +1,19 @@
 import argparse
+import importlib.util
 import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import blackjack_engine as bj
+import hand_sign_vision
 from DealerBotMain import (
     action_from_hand_count,
     split_signal_for_round,
 )
 from camera_utils import open_camera
 from hand_sign_vision import HandSignStabilizer, analyze_hand_image
-from single_card_vision import process_image_as_card
-from ur_robot_bridge import PcModbusOutputServer, RobotDirectClient
+from ur_robot_bridge import DEFAULT_BUSYIO_COIL, PcModbusOutputServer, RobotDirectClient
 
 
 PHASE_WAITING_START = "waiting_start"
@@ -26,6 +27,71 @@ INITIAL_CARD_STEPS = (
     "dealer_upcard",
     "player_second",
 )
+
+CARD_DETECTOR_PATH = Path(__file__).resolve().parent / "Camera_otimizado_CORRETO .py"
+
+
+def _load_card_detector():
+    spec = importlib.util.spec_from_file_location("camera_otimizado_correto", CARD_DETECTOR_PATH)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Nao foi possivel carregar detector de cartas: {CARD_DETECTOR_PATH}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_CARD_DETECTOR = None
+
+
+def _card_detector():
+    global _CARD_DETECTOR
+    if _CARD_DETECTOR is None:
+        _CARD_DETECTOR = _load_card_detector()
+    return _CARD_DETECTOR
+
+
+def _rank_to_blackjack_value(rank: str) -> int:
+    if rank == "A":
+        return 11
+    if rank in {"10", "J", "Q", "K"}:
+        return 10
+    try:
+        return int(rank)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _recognized_value_to_card(value: object, debug: dict[str, object] | None = None) -> dict[str, object]:
+    if value == "A":
+        rank = "A"
+    elif isinstance(value, int) and 2 <= value <= 10:
+        rank = str(value)
+    else:
+        rank = "unknown"
+
+    card = {
+        "rank": rank,
+        "suit": "unknown",
+        "card_id": None,
+        "blackjack_value": _rank_to_blackjack_value(rank),
+        "rank_score": 1.0 if rank != "unknown" else 0.0,
+        "suit_score": 0.0,
+        "status": "ok" if rank != "unknown" else "unknown",
+    }
+    if debug is not None:
+        card["debug"] = debug
+    return card
+
+
+def process_image_as_card(image) -> tuple[dict[str, object], dict[str, object]]:
+    value, result = _card_detector().processar_imagem(image)
+    return _recognized_value_to_card(value, result["analise"]), result
+
+
+def _copy_card(card: dict) -> dict:
+    copied = dict(card)
+    copied.pop("debug", None)
+    return copied
 
 
 @dataclass
@@ -60,7 +126,9 @@ class RobotRoundOrchestrator:
         action_hold: float = 0.3,
         start_hold: float = 0.5,
         stand_hold: float = 0.2,
-        natural_stand_hold: float = 1.0,
+        natural_stand_hold: float = 4.0,
+        natural_stand_idle_timeout: float = 20.0,
+        dealer_action_idle_timeout: float = 0.0,
         stable_samples: int = 2,
         show: bool = False,
         dry_run_robot: bool = False,
@@ -68,11 +136,12 @@ class RobotRoundOrchestrator:
         gesture_resend_interval: float = 0.0,
         auto_foto: bool = True,
         foto_coil: int = 17,
-        busyio_coil: int = 2,
+        busyio_coil: int = DEFAULT_BUSYIO_COIL,
         output_source: str = "coils",
         pc_output_server: bool = False,
         foto_cooldown: float = 0.4,
         foto_delay: float = 0.8,
+        fast_hand_vision: bool = False,
     ) -> None:
         self.camera_index = camera_index
         self.hand_interval = hand_interval
@@ -80,6 +149,8 @@ class RobotRoundOrchestrator:
         self.start_hold = start_hold
         self.stand_hold = stand_hold
         self.natural_stand_hold = natural_stand_hold
+        self.natural_stand_idle_timeout = natural_stand_idle_timeout
+        self.dealer_action_idle_timeout = dealer_action_idle_timeout
         self.show = show
         self.dry_run_robot = dry_run_robot
         self.gesture_test = gesture_test
@@ -91,14 +162,17 @@ class RobotRoundOrchestrator:
         self.pc_output_server = pc_output_server
         self.foto_cooldown = foto_cooldown
         self.foto_delay = foto_delay
+        self.fast_hand_vision = fast_hand_vision
         self.phase = PHASE_WAITING_START
         self.initial_cards = PendingInitialCards()
         self.round_state: bj.BlackjackRound | None = None
         self._pending_player_action: str | None = None
         self._pending_player_draws: list[dict] = []
         self._pending_player_draws_needed = 0
+        self._pending_split_draw_targets: list[int] = []
         self._pending_dealer_card = False
         self._natural_blackjack_reveal_pending = False
+        self._player_bust_reveal_pending = False
         self._last_foto = False
         self._last_outputs_seen: tuple[bool, bool, str] | None = None
         self._last_foto_capture_at = 0.0
@@ -140,6 +214,7 @@ class RobotRoundOrchestrator:
     def run(self) -> None:
         import cv2
 
+        self._configure_hand_vision()
         cap = open_camera(self.camera_index)
         if cap is None:
             print(f"Erro: nao foi possivel usar a camera {self.camera_index}.")
@@ -192,6 +267,14 @@ class RobotRoundOrchestrator:
                 cv2.destroyAllWindows()
             self.close()
 
+    def _configure_hand_vision(self) -> None:
+        if not self.fast_hand_vision:
+            return
+        if hand_sign_vision.USE_HAND_SKELETON_DETECTOR or hand_sign_vision.USE_HAND_DATASET_CLASSIFIER:
+            hand_sign_vision.USE_HAND_SKELETON_DETECTOR = False
+            hand_sign_vision.USE_HAND_DATASET_CLASSIFIER = False
+            print("[hand] visao rapida ligada; MediaPipe/dataset desativados no orquestrador")
+
     def reset_round(self) -> None:
         self.phase = PHASE_WAITING_START
         self.initial_cards = PendingInitialCards()
@@ -199,8 +282,10 @@ class RobotRoundOrchestrator:
         self._pending_player_action = None
         self._pending_player_draws = []
         self._pending_player_draws_needed = 0
+        self._pending_split_draw_targets = []
         self._pending_dealer_card = False
         self._natural_blackjack_reveal_pending = False
+        self._player_bust_reveal_pending = False
         self._last_foto = False
         self._last_foto_capture_at = 0.0
         self._last_action = None
@@ -370,13 +455,8 @@ class RobotRoundOrchestrator:
             self._last_action_at = time.monotonic()
             return
 
-        if self.phase == PHASE_WAITING_START and action == "startprog":
-            self._pulse("startprog", self.start_hold)
-            self.phase = PHASE_INITIAL_DEAL
-            self._last_action = action
-            self._last_action_at = time.monotonic()
-            print("[round] startprog enviado; aguardando cartas iniciais via foto (c = captura manual)")
-            self._append_event("startprog_sent", action=action)
+        if self.phase in {PHASE_WAITING_START, PHASE_FINISHED} and action == "startprog":
+            self._start_round_from_gesture()
             return
 
         if self.phase == PHASE_PLAYER_TURN:
@@ -392,6 +472,27 @@ class RobotRoundOrchestrator:
         self._last_action = action
         self._last_action_at = time.monotonic()
 
+    def _start_round_from_gesture(self) -> None:
+        if self.phase == PHASE_FINISHED:
+            self.initial_cards = PendingInitialCards()
+            self.round_state = None
+            self._pending_player_action = None
+            self._pending_player_draws = []
+            self._pending_player_draws_needed = 0
+            self._pending_split_draw_targets = []
+            self._pending_dealer_card = False
+            self._natural_blackjack_reveal_pending = False
+            self._player_bust_reveal_pending = False
+            self._last_foto = False
+            print("[round] nova rodada solicitada apos finished")
+
+        self._pulse("startprog", self.start_hold)
+        self.phase = PHASE_INITIAL_DEAL
+        self._last_action = "startprog"
+        self._last_action_at = time.monotonic()
+        print("[round] startprog enviado; aguardando cartas iniciais via foto (c = captura manual)")
+        self._append_event("startprog_sent", action="startprog")
+
     def _should_resend_gesture_action(self) -> bool:
         return (
             self.gesture_test
@@ -402,6 +503,8 @@ class RobotRoundOrchestrator:
     def _action_from_fingers(self, fingers: int | None) -> str | None:
         if self.gesture_test and fingers != 4:
             return action_from_hand_count(fingers, phase=PHASE_PLAYER_TURN)
+        if self.phase == PHASE_FINISHED:
+            return "startprog" if fingers == 4 else None
         return action_from_hand_count(fingers, phase=self.phase)
 
     def _handle_gesture_test_action(self, action: str) -> None:
@@ -410,6 +513,7 @@ class RobotRoundOrchestrator:
             print(f"[gesture-test] sem sinal fisico para {action}")
             return
 
+        self._wait_robot_idle_before_gesture_signal(action)
         self._pulse(robot_signal, self._hold_for_action(action))
         if action == "startprog":
             self.phase = PHASE_INITIAL_DEAL
@@ -484,6 +588,7 @@ class RobotRoundOrchestrator:
                 self.initial_cards.dealer_upcard,
                 dealer_hole_card=None,
             )
+            self.round_state.dealer_hole_revealed = False
             self._pending_player_action = None
             self._pending_player_draws = []
             self._pending_player_draws_needed = 0
@@ -514,15 +619,72 @@ class RobotRoundOrchestrator:
         if self.round_state is None:
             return
 
-        print("[round] blackjack natural do jogador; enviando stand para revelar dealer")
-        self.phase = PHASE_DEALER_TURN
+        print("[round] blackjack natural do jogador; enviando stand do jogador para revelar dealer")
+        self.phase = PHASE_PLAYER_TURN
         self._pending_player_action = None
         self._pending_player_draws = []
         self._pending_player_draws_needed = 0
+        self._pending_split_draw_targets = []
+        self._wait_foto_released_before_player_stand()
+        self._wait_robot_idle_before_natural_stand()
+        self._pulse("stand", self.natural_stand_hold)
+        self.phase = PHASE_DEALER_TURN
         self._pending_dealer_card = True
         self._natural_blackjack_reveal_pending = True
-        self._pulse("stand", self.natural_stand_hold)
         print("[dealer] aguardando carta fechada revelada via foto")
+
+    def _wait_robot_idle_before_natural_stand(self) -> None:
+        if self._output_reader is None:
+            return
+        if self.natural_stand_idle_timeout <= 0:
+            return
+
+        print(
+            "[robot] aguardando busyIO=LO para enviar stand natural "
+            f"(coil {self.busyio_coil}, timeout={self.natural_stand_idle_timeout:.2f}s)"
+        )
+        deadline = time.monotonic() + self.natural_stand_idle_timeout
+        while time.monotonic() < deadline:
+            outputs = self._output_reader.read_outputs(
+                foto_coil=self.foto_coil,
+                busyio_coil=self.busyio_coil,
+                source=self.output_source,
+            )
+            outputs_seen = (outputs.foto, outputs.busyIO, outputs.source)
+            if outputs_seen != self._last_outputs_seen:
+                print(
+                    "[robot] outputs "
+                    f"foto={'HI' if outputs.foto else 'LO'} "
+                    f"busyIO={'HI' if outputs.busyIO else 'LO'} "
+                    f"source={outputs.source}"
+                )
+                self._last_outputs_seen = outputs_seen
+
+            if not outputs.busyIO:
+                self._last_outputs_seen = (outputs.foto, outputs.busyIO, outputs.source)
+                print("[robot] busyIO=LO; enviando stand natural")
+                return
+            time.sleep(0.05)
+
+        print("[robot] aviso: busyIO=LO nao foi confirmado; enviando stand natural mesmo assim")
+
+    def _wait_foto_released_before_player_stand(self, timeout: float = 3.0) -> None:
+        if self._output_reader is None:
+            return
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            outputs = self._output_reader.read_outputs(
+                foto_coil=self.foto_coil,
+                busyio_coil=self.busyio_coil,
+                source=self.output_source,
+            )
+            if not outputs.foto:
+                self._last_foto = False
+                return
+            time.sleep(0.05)
+
+        print("[robot] aviso: foto continuou HI antes do stand natural; enviando stand mesmo assim")
 
     def handle_player_action(self, action: str) -> None:
         if self._pending_player_action is not None:
@@ -546,7 +708,17 @@ class RobotRoundOrchestrator:
             print(f"[round] sem sinal fisico valido para {action}; nada enviado")
             return
 
+        self._wait_robot_idle_before_gesture_signal(action)
         self._pulse(robot_signal, self._hold_for_action(action))
+
+        if action == "split":
+            accepted = self._start_split_action(robot_signal)
+            if not accepted:
+                print("[round] split rejeitado; estado das maos nao foi alterado")
+                return
+            print("[round] split aplicado; aguardando 2 cartas via foto")
+            self._print_round_state()
+            return
 
         if action in {"hit", "double", "split"}:
             self._pending_player_action = action
@@ -565,12 +737,61 @@ class RobotRoundOrchestrator:
         self._print_round_state()
         self._after_player_state_update()
 
+    def _start_split_action(self, robot_signal: str) -> bool:
+        if self.round_state is None:
+            return False
+
+        hand_index = self.round_state.active_hand_index
+        hand = self.round_state.current_hand()
+        if hand is None or len(hand.cards) != 2:
+            return False
+
+        first_card, second_card = hand.cards
+        first_hand = bj.BlackjackHand(cards=[_copy_card(first_card)], from_split=True)
+        second_hand = bj.BlackjackHand(cards=[_copy_card(second_card)], from_split=True)
+
+        if robot_signal == "splitAB":
+            self.round_state.player_hands[hand_index:hand_index + 1] = [first_hand, second_hand]
+            draw_targets = [0, 1]
+        elif robot_signal == "splitAC" and len(self.round_state.player_hands) == 2 and hand_index == 0:
+            self.round_state.player_hands[0] = first_hand
+            self.round_state.player_hands.append(second_hand)
+            draw_targets = [0, 2]
+        elif robot_signal == "splitBC" and len(self.round_state.player_hands) == 2 and hand_index == 1:
+            self.round_state.player_hands[1] = first_hand
+            self.round_state.player_hands.append(second_hand)
+            draw_targets = [1, 2]
+        else:
+            return False
+
+        self.round_state.split_count += 1
+        self.round_state.active_hand_index = hand_index
+        self.round_state.events.append(
+            {
+                "stage": "player_action",
+                "action": "split",
+                "accepted": True,
+                "hand_index": hand_index,
+                "robot_signal": robot_signal,
+                "draw_targets": draw_targets,
+            }
+        )
+        self._pending_player_action = "split"
+        self._pending_player_draws = []
+        self._pending_player_draws_needed = 2
+        self._pending_split_draw_targets = draw_targets
+        return True
+
     def _add_player_action_card(self, card: dict) -> None:
         if self.round_state is None:
             print("[round] carta ignorada; round_state ainda nao existe")
             return
         if self._pending_player_action is None:
             print("[card] carta capturada durante player_turn, mas nenhuma acao aguardava carta")
+            return
+
+        if self._pending_player_action == "split":
+            self._add_split_draw_card(card)
             return
 
         self._pending_player_draws.append(card)
@@ -584,8 +805,64 @@ class RobotRoundOrchestrator:
         self._pending_player_action = None
         self._pending_player_draws = []
         self._pending_player_draws_needed = 0
+        self._pending_split_draw_targets = []
+        acted_hand_index = self.round_state.active_hand_index
         accepted = bj.apply_player_action(self.round_state, action, lambda: next(draw_cards))
         print(f"[round] acao aplicada={accepted}: {action}")
+        self._print_round_state()
+        if accepted:
+            self._auto_stand_after_closed_player_total(acted_hand_index)
+        self._after_player_state_update()
+
+    def _auto_stand_after_closed_player_total(self, hand_index: int) -> None:
+        if self.round_state is None or hand_index >= len(self.round_state.player_hands):
+            return
+        hand = self.round_state.player_hands[hand_index]
+        reason = None
+        if hand.is_busted:
+            reason = "bustou"
+        elif hand.is_active and hand.total == 21:
+            hand.status = bj.STATUS_STOOD
+            reason = "fez 21"
+        if reason is None:
+            return
+
+        hand_label = ("A", "B", "C")[hand_index]
+        print(f"[round] mao {hand_label} {reason}; enviando stand automatico para trocar de mao")
+        self._wait_robot_idle_before_gesture_signal("stand")
+        self._pulse("stand", self.stand_hold)
+        self._append_event("player_auto_stand", hand=hand_label, reason=reason)
+
+    def _add_split_draw_card(self, card: dict) -> None:
+        if self.round_state is None:
+            return
+        draw_number = len(self._pending_player_draws)
+        if draw_number >= len(self._pending_split_draw_targets):
+            print("[round] carta de split ignorada; nao ha mao alvo pendente")
+            return
+
+        target_index = self._pending_split_draw_targets[draw_number]
+        self._pending_player_draws.append(card)
+        self.round_state.player_hands[target_index].cards.append(_copy_card(card))
+        if bj.is_bust(self.round_state.player_hands[target_index].cards):
+            self.round_state.player_hands[target_index].status = bj.STATUS_BUSTED
+
+        hand_label = ("A", "B", "C")[target_index]
+        print(f"[round] carta de split adicionada na mao {hand_label}: {bj.card_label(card)}")
+
+        remaining = self._pending_player_draws_needed - len(self._pending_player_draws)
+        if remaining > 0:
+            print(f"[round] aguardando mais {remaining} carta(s) para split")
+            self._print_round_state()
+            return
+
+        self._pending_player_action = None
+        self._pending_player_draws = []
+        self._pending_player_draws_needed = 0
+        self._pending_split_draw_targets = []
+        self.round_state.current_hand()
+        print("[round] split completo")
+        self._append_event("split_completed", snapshot=self._build_round_snapshot("split_completed"))
         self._print_round_state()
         self._after_player_state_update()
 
@@ -601,15 +878,23 @@ class RobotRoundOrchestrator:
             card=bj.card_label(card),
             dealer_cards=[bj.card_label(item) for item in self.round_state.dealer_cards],
         )
+        if not self.round_state.dealer_hole_revealed:
+            bj.reveal_dealer_hole(self.round_state)
         self._print_round_state()
         if self._natural_blackjack_reveal_pending:
             self._natural_blackjack_reveal_pending = False
-            bj.reveal_dealer_hole(self.round_state)
             self.round_state.dealer_status = bj.STATUS_STOOD
             bj.resolve_round(self.round_state)
+            print("[round] blackjack natural revelado; enviando stand final para encerrar no robo")
+            self._wait_robot_idle_before_gesture_signal("stand")
+            self._pulse("stand", self.stand_hold)
             self.phase = PHASE_FINISHED
             print("[round] blackjack natural resolvido apos revelar dealer")
             self._print_round_state()
+            self._print_final_result_summary()
+            return
+        if self._player_bust_reveal_pending:
+            self._finish_after_player_bust_reveal()
             return
         self._drive_dealer_turn()
 
@@ -618,21 +903,55 @@ class RobotRoundOrchestrator:
             return
 
         if all(hand.is_busted for hand in self.round_state.player_hands):
-            print("[round] todas as maos do jogador estouraram; rodada encerrada")
-            self.round_state.dealer_status = bj.STATUS_STOOD
-            bj.resolve_round(self.round_state)
-            self.phase = PHASE_FINISHED
-            self._append_event("player_bust_round_finished")
-            self._print_round_state()
+            self._enter_dealer_reveal_after_player_bust()
             return
 
         if self.round_state.current_hand() is None:
             self._enter_dealer_turn()
 
+    def _enter_dealer_reveal_after_player_bust(self) -> None:
+        if self.round_state is None:
+            return
+
+        self.phase = PHASE_DEALER_TURN
+        self._last_action = None
+        self._player_bust_reveal_pending = True
+        print("[round] todas as maos do jogador estouraram; revelando dealer antes de encerrar")
+        if not self.round_state.dealer_hole_revealed and len(self.round_state.dealer_cards) == 1:
+            self._pending_dealer_card = True
+            print("[dealer] aguardando carta fechada revelada via foto")
+            self._append_event("dealer_waiting_hole_reveal_after_player_bust")
+            return
+        self._finish_after_player_bust_reveal()
+
+    def _finish_after_player_bust_reveal(self) -> None:
+        if self.round_state is None:
+            return
+
+        self._player_bust_reveal_pending = False
+        self.round_state.dealer_status = bj.STATUS_STOOD
+        print("[dealer] cartas reveladas; enviando stand final antes de encerrar")
+        self._wait_robot_idle_before_dealer_action()
+        self._pulse("stand", self.stand_hold)
+        bj.resolve_round(self.round_state)
+        self.phase = PHASE_FINISHED
+        self._append_event("player_bust_round_finished")
+        self._print_round_state()
+        self._print_final_result_summary()
+
     def _enter_dealer_turn(self) -> None:
         self.phase = PHASE_DEALER_TURN
         self._last_action = None
         print("[round] maos do jogador encerradas; dealer_turn iniciado")
+        if (
+            self.round_state is not None
+            and not self.round_state.dealer_hole_revealed
+            and len(self.round_state.dealer_cards) == 1
+        ):
+            self._pending_dealer_card = True
+            print("[dealer] aguardando carta fechada revelada via foto")
+            self._append_event("dealer_waiting_hole_reveal")
+            return
         self._drive_dealer_turn()
 
     def _drive_dealer_turn(self) -> None:
@@ -641,8 +960,26 @@ class RobotRoundOrchestrator:
         if self._pending_dealer_card:
             return
 
+        if bj.is_bust(self.round_state.dealer_cards):
+            self.round_state.dealer_status = bj.STATUS_BUSTED
+            print("[dealer] bustou; aguardando idle e enviando stand final")
+            self._wait_robot_idle_before_dealer_action()
+            self._pulse("stand", self.stand_hold)
+            bj.resolve_round(self.round_state)
+            self.phase = PHASE_FINISHED
+            print("Jogador Venceu")
+            print("[round] dealer bustou; rodada resolvida")
+            self._append_event(
+                "dealer_bust_round_resolved",
+                dealer_total=self.round_state.dealer_total,
+            )
+            self._print_round_state()
+            self._print_final_result_summary()
+            return
+
         if bj.dealer_action(self.round_state.dealer_cards) == bj.ACTION_HIT:
             print("[dealer] total < 17; hit forcado")
+            self._wait_robot_idle_before_dealer_action()
             self._pulse("hit", self.action_hold)
             self._pending_dealer_card = True
             print("[dealer] aguardando carta via foto")
@@ -653,6 +990,7 @@ class RobotRoundOrchestrator:
             if bj.is_bust(self.round_state.dealer_cards)
             else bj.STATUS_STOOD
         )
+        self._wait_robot_idle_before_dealer_action()
         self._pulse("stand", self.stand_hold)
         bj.resolve_round(self.round_state)
         self.phase = PHASE_FINISHED
@@ -663,6 +1001,80 @@ class RobotRoundOrchestrator:
             dealer_total=self.round_state.dealer_total,
         )
         self._print_round_state()
+        self._print_final_result_summary()
+
+    def _wait_robot_idle_before_dealer_action(self) -> None:
+        if self._output_reader is None:
+            return
+
+        print(
+            "[robot] aguardando busyIO=LO antes da acao automatica do dealer "
+            f"(coil {self.busyio_coil}, "
+            f"timeout={self.dealer_action_idle_timeout:.2f}s; 0=sem timeout)"
+        )
+        deadline = (
+            None
+            if self.dealer_action_idle_timeout <= 0
+            else time.monotonic() + self.dealer_action_idle_timeout
+        )
+        while True:
+            outputs = self._output_reader.read_outputs(
+                foto_coil=self.foto_coil,
+                busyio_coil=self.busyio_coil,
+                source=self.output_source,
+            )
+            outputs_seen = (outputs.foto, outputs.busyIO, outputs.source)
+            if outputs_seen != self._last_outputs_seen:
+                print(
+                    "[robot] outputs "
+                    f"foto={'HI' if outputs.foto else 'LO'} "
+                    f"busyIO={'HI' if outputs.busyIO else 'LO'} "
+                    f"source={outputs.source}"
+                )
+                self._last_outputs_seen = outputs_seen
+
+            if not outputs.busyIO:
+                self._last_outputs_seen = (outputs.foto, outputs.busyIO, outputs.source)
+                print("[robot] busyIO=LO; enviando acao automatica do dealer")
+                return
+            time.sleep(0.05)
+
+            if deadline is not None and time.monotonic() >= deadline:
+                print(
+                    "[robot] aviso: busyIO=LO nao foi confirmado; "
+                    "continuando espera antes da acao do dealer"
+                )
+                deadline = time.monotonic() + self.dealer_action_idle_timeout
+
+    def _wait_robot_idle_before_gesture_signal(self, action: str) -> None:
+        if self._output_reader is None:
+            return
+
+        print(
+            "[robot] aguardando busyIO=LO antes do gesto "
+            f"{action} (coil {self.busyio_coil})"
+        )
+        while True:
+            outputs = self._output_reader.read_outputs(
+                foto_coil=self.foto_coil,
+                busyio_coil=self.busyio_coil,
+                source=self.output_source,
+            )
+            outputs_seen = (outputs.foto, outputs.busyIO, outputs.source)
+            if outputs_seen != self._last_outputs_seen:
+                print(
+                    "[robot] outputs "
+                    f"foto={'HI' if outputs.foto else 'LO'} "
+                    f"busyIO={'HI' if outputs.busyIO else 'LO'} "
+                    f"source={outputs.source}"
+                )
+                self._last_outputs_seen = outputs_seen
+
+            if not outputs.busyIO:
+                self._last_outputs_seen = (outputs.foto, outputs.busyIO, outputs.source)
+                print(f"[robot] busyIO=LO; enviando gesto {action}")
+                return
+            time.sleep(0.05)
 
     def _robot_signal_for_action(self, action: str) -> str | None:
         if action == "split":
@@ -704,6 +1116,18 @@ class RobotRoundOrchestrator:
             "round_state",
             snapshot=self._build_round_snapshot("round_state"),
         )
+
+    def _print_final_result_summary(self) -> None:
+        if self.round_state is None:
+            return
+        winners = []
+        for index, hand in enumerate(self.round_state.player_hands):
+            if hand.result == bj.RESULT_WIN:
+                winners.append(("A", "B", "C")[index])
+        if winners:
+            print(f"Jogador venceu {len(winners)} mao(s): {', '.join(winners)}")
+        else:
+            print("Dealer venceu!")
 
     def physical_hands_snapshot(self) -> dict[str, list[str]]:
         player_hands = self.round_state.player_hands if self.round_state is not None else []
@@ -754,11 +1178,14 @@ class RobotRoundOrchestrator:
             "pending_player_draws_needed": self._pending_player_draws_needed,
             "pending_dealer_card": self._pending_dealer_card,
             "natural_blackjack_reveal_pending": self._natural_blackjack_reveal_pending,
+            "player_bust_reveal_pending": self._player_bust_reveal_pending,
             "foto_coil": self.foto_coil,
             "busyio_coil": self.busyio_coil,
             "output_source": self.output_source,
             "foto_delay": self.foto_delay,
             "natural_stand_hold": self.natural_stand_hold,
+            "natural_stand_idle_timeout": self.natural_stand_idle_timeout,
+            "dealer_action_idle_timeout": self.dealer_action_idle_timeout,
         }
         if self.round_state is not None:
             summary = bj.round_summary(self.round_state)
@@ -812,11 +1239,28 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--natural-stand-hold",
         type=float,
-        default=1.0,
+        default=4.0,
         help="Hold de stand usado para sair da fase do jogador em blackjack natural.",
     )
+    parser.add_argument(
+        "--natural-stand-idle-timeout",
+        type=float,
+        default=20.0,
+        help="Timeout esperando busyIO=LO antes do stand automatico em blackjack natural.",
+    )
+    parser.add_argument(
+        "--dealer-action-idle-timeout",
+        type=float,
+        default=0.0,
+        help="Timeout esperando busyIO=LO antes de hit/stand automaticos do dealer. 0 espera sem limite.",
+    )
     parser.add_argument("--foto-coil", type=int, default=17, help="Coil de saida foto do UR.")
-    parser.add_argument("--busyio-coil", type=int, default=2, help="Coil de saida busyIO do UR.")
+    parser.add_argument(
+        "--busyio-coil",
+        type=int,
+        default=DEFAULT_BUSYIO_COIL,
+        help="Coil de saida busyIO do UR.",
+    )
     parser.add_argument(
         "--output-source",
         choices=["auto", "coils", "discrete_inputs", "holding_registers", "input_registers"],
@@ -829,6 +1273,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.8,
         help="Atraso entre a borda foto=HI e a captura da carta.",
+    )
+    parser.add_argument(
+        "--fast-hand-vision",
+        action="store_true",
+        help="Desativa MediaPipe/dataset na leitura de maos para iniciar mais rapido, com menor precisao.",
     )
     parser.add_argument(
         "--no-auto-foto",
@@ -895,6 +1344,8 @@ def main() -> None:
         start_hold=args.start_hold,
         stand_hold=args.stand_hold,
         natural_stand_hold=args.natural_stand_hold,
+        natural_stand_idle_timeout=args.natural_stand_idle_timeout,
+        dealer_action_idle_timeout=args.dealer_action_idle_timeout,
         auto_foto=not args.no_auto_foto,
         foto_coil=args.foto_coil,
         busyio_coil=args.busyio_coil,
@@ -902,6 +1353,7 @@ def main() -> None:
         pc_output_server=args.pc_output_server,
         foto_cooldown=args.foto_cooldown,
         foto_delay=args.foto_delay,
+        fast_hand_vision=args.fast_hand_vision,
         stable_samples=args.stable_samples,
         show=args.show,
         dry_run_robot=args.dry_run_robot,

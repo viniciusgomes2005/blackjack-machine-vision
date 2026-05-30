@@ -737,11 +737,17 @@ def _convexity_gap_count(contour, palm_radius, angle_limit=90, depth_radius_mult
     if w == 0 or h == 0:
         return 0
 
-    hull = cv2.convexHull(contour, returnPoints=False)
+    try:
+        hull = cv2.convexHull(contour, returnPoints=False)
+    except cv2.error:
+        return 0
     if hull is None or len(hull) < 4:
         return 0
 
-    defects = cv2.convexityDefects(contour, hull)
+    try:
+        defects = cv2.convexityDefects(contour, hull)
+    except cv2.error:
+        return 0
     if defects is None:
         return 0
 

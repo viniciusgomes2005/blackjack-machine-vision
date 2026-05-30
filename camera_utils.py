@@ -2,6 +2,7 @@ try:
     import cv2
 except ModuleNotFoundError:
     cv2 = None
+import platform
 
 
 REQUESTED_RESOLUTIONS = ((1920, 1080), (1280, 720), (640, 480), (320, 240))
@@ -27,6 +28,18 @@ def _effective_resolution(cap):
     return width, height
 
 
+def _candidate_backends():
+    if platform.system() == "Windows":
+        candidates = []
+        if hasattr(cv2, "CAP_DSHOW"):
+            candidates.append(cv2.CAP_DSHOW)
+        if hasattr(cv2, "CAP_MSMF"):
+            candidates.append(cv2.CAP_MSMF)
+        candidates.append(None)
+        return candidates
+    return [None]
+
+
 def open_camera(camera_index=0, requested_resolutions=REQUESTED_RESOLUTIONS):
     """
     Abre a camera tentando resolucoes altas primeiro.
@@ -38,8 +51,14 @@ def open_camera(camera_index=0, requested_resolutions=REQUESTED_RESOLUTIONS):
     _require_cv2()
 
     print(f"Camera index: {camera_index}")
-    cap = cv2.VideoCapture(camera_index)
-    if not cap.isOpened():
+    cap = None
+    for backend in _candidate_backends():
+        candidate = cv2.VideoCapture(camera_index) if backend is None else cv2.VideoCapture(camera_index, backend)
+        if candidate.isOpened():
+            cap = candidate
+            break
+        candidate.release()
+    if cap is None:
         print(f"Aviso: nao foi possivel abrir a camera no indice {camera_index}.")
         return None
 

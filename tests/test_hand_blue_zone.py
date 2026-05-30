@@ -91,6 +91,26 @@ def test_hand_sign_stabilizer_requires_repeated_values():
     assert stabilizer.update(4) == 2
 
 
+def test_convexity_gap_count_ignores_invalid_opencv_contour(monkeypatch):
+    class FakeCv2Error(Exception):
+        pass
+
+    contour = np.array([[[0, 0]], [[4, 4]], [[0, 4]], [[4, 0]]], dtype=np.int32)
+    monkeypatch.setattr(hand_sign_vision.cv2, "error", FakeCv2Error)
+    monkeypatch.setattr(
+        hand_sign_vision.cv2,
+        "convexHull",
+        lambda *_args, **_kwargs: np.array([[0], [1], [2], [3]], dtype=np.int32),
+    )
+
+    def raise_bad_contour(*_args, **_kwargs):
+        raise FakeCv2Error("invalid contour")
+
+    monkeypatch.setattr(hand_sign_vision.cv2, "convexityDefects", raise_bad_contour)
+
+    assert hand_sign_vision._convexity_gap_count(contour, 10) == 0
+
+
 def test_finger_detector_counts_raised_fingertips_from_palm_shape():
     one_finger = np.zeros((220, 220), dtype=np.uint8)
     cv2.circle(one_finger, (100, 150), 38, 255, -1)
